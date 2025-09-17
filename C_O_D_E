@@ -1,4 +1,3 @@
-//
 //+------------------------------------------------------------------+
 //|                                            SMC_Complete.mqh      |
 //|                          Smart Money Concepts Trading Library    |
@@ -661,4 +660,427 @@ bool CSMCTradingSystem::IsBestOrderBlockTapped(int &index, bool bias)
 bool CSMCTradingSystem::IsBestFVGTapped(int &index, bool bias)
 {
     index = GetBestFVGIndex(bias);
-    if(index < 
+    if(index < 0)
+        return false;
+    
+    double price = symbolInfo.Bid();
+    return (price <= m_recentFVGs[index].upper && price >= m_recentFVGs[index].lower);
+}
+
+bool CSMCTradingSystem::IsPinBarPattern(bool bullish, ENUM_TIMEFRAMES tf)
+{
+    double open = iOpen(m_symbol, tf, 1);
+    double close = iClose(m_symbol, tf, 1);
+    double high = iHigh(m_symbol, tf, 1);
+    double low = iLow(m_symbol, tf, 1);
+    
+    double body = MathAbs(close - open);
+    double wick = bullish ? (close - low) : (high - close);
+    double total = high - low;
+    
+    if(total == 0)
+        return false;
+    
+    return (body / total < 0.3 && wick / total > 0.6);
+}
+
+bool CSMCTradingSystem::IsEngulfingPattern(bool bullish, ENUM_TIMEFRAMES tf)
+{
+    double open1 = iOpen(m_symbol, tf, 1);
+    double close1 = iClose(m_symbol, tf, 1);
+    double open2 = iOpen(m_symbol, tf, 2);
+    double close2 = iClose(m_symbol, tf, 2);
+    
+    if(bullish)
+    {
+        return (close1 > open1 && open1 < close2 && close1 > open2);
+    }
+    else
+    {
+        return (close1 < open1 && open1 > close2 && close1 < open2);
+    }
+}
+
+bool CSMCTradingSystem::UpdateInternalBreakOfStructure(ENUM_TIMEFRAMES tf, bool bias)
+{
+    double high[], low[], close[];
+    ArraySetAsSeries(high, true);
+    ArraySetAsSeries(low, true);
+    ArraySetAsSeries(close, true);
+    
+    if(CopyHigh(m_symbol, tf, 0, 5, high) < 5 || 
+       CopyLow(m_symbol, tf, 0, 5, low) < 5 || 
+       CopyClose(m_symbol, tf, 0, 5, close) < 5)
+    {
+        return false;
+    }
+    
+    double recentHigh = high[1];
+    double recentLow = low[1];
+    
+    if(!m_InternalStructure.isInitialized)
+    {
+        m_InternalStructure.lastHH = recentHigh;
+        m_InternalStructure.lastLL = recentLow;
+        m_InternalStructure.lastHL = recentLow;
+        m_InternalStructure.lastLH = recentHigh;
+        m_InternalStructure.isInitialized = true;
+        m_InternalStructure.isBullish = bias;
+        return false;
+    }
+    
+    if(bias)
+    {
+        if(close[1] > m_InternalStructure.lastLH)
+        {
+            m_InternalStructure.isBullish = true;
+            return true;
+        }
+    }
+    else
+    {
+        if(close[1] < m_InternalStructure.lastHL)
+        {
+            m_InternalStructure.isBullish = false;
+            return true;
+        }
+    }
+    
+    return false;
+}
+
+double CSMCTradingSystem::CalculateATR(ENUM_TIMEFRAMES tf, int period)
+{
+    double atrBuffer[];
+    ArraySetAsSeries(atrBuffer, true);
+    
+    int atrHandle = iATR(m_symbol, tf, period);
+    if(atrHandle == INVALID_HANDLE)
+    {
+        Print("Failed to create ATR indicator");
+        return 0.0;
+    }
+    
+    if(CopyBuffer(atrHandle, 0, 0, 1, atrBuffer) <= 0)
+    {
+        IndicatorRelease(atrHandle);
+        return 0.0;
+    }
+    
+    double atrValue = atrBuffer[0];
+    IndicatorRelease(atrHandle);
+    
+    return atrValue;
+}
+
+void CSMCTradingSystem::UpdateZones()
+{
+    if(m_settings.enableOBs)
+    {
+        DetectOrderBlocksInternal(m_HTF, 50);
+        DetectOrderBlocksInternal(m_LTF, 50);
+    }
+    
+    if(m_settings.enableFVGs)
+    {
+        DetectFVGZonesInternal(m_HTF, 50);
+        DetectFVGZonesInternal(m_LTF, 50);
+    }
+}
+
+void CSMCTradingSystem::FilterZones()
+{
+    if(m_settings.enableOBs)
+        FilterOverlappingOBs();
+    
+    if(m_settings.enableFVGs)
+        FilterOverlappingFVGs();
+}
+
+bool CSMCTradingSystem::ShouldExecuteTrade()
+{
+    // Check if both HTF and LTF are aligned
+    bool marketBias = m_HTFStructure.isBullish && m_LTFStructure.isBullish;
+    
+    int obIndex, fvgIndex;
+    bool tappedOB = m_settings.enableOBs && IsBestOrderBlockTapped(obIndex, marketBias);
+    bool tappedFVG = m_settings.enableFVGs && !tappedOB && IsBestFVGTapped(fvgIndex, marketBias);
+    
+    if(tappedOB || tappedFVG)
+    {
+        // Check internal break of structure filter
+        bool microOK = !m_settings.requireInternalBoS || 
+                       UpdateInternalBreakOfStructure(PERIOD_M1, marketBias);
+        
+        // Check candlestick pattern filters
+        bool candleOK = (!m_settings.usePinBar && !m_settings.useEngulfing) ||
+                        (m_settings.usePinBar && IsPinBarPattern(marketBias, PERIOD_M1)) ||
+                        (m_settings.useEngulfing && IsEngulfingPattern(marketBias, PERIOD_M1));
+        
+        if(microOK && candleOK)
+        {
+            return true;
+        }
+    }
+    
+    return false;
+}
+
+bool CSMCTradingSystem::ExecuteTrade()
+{
+    if(!symbolInfo.RefreshRates())
+    {
+        Print("Failed to refresh rates");
+        return false;
+    }
+    
+    bool marketBias = m_HTFStructure.isBullish && m_LTFStructure.isBullish;
+    double atr = CalculateATR(m_LTF, 14);
+    
+    if(atr == 0)
+    {
+        Print("ATR calculation failed");
+        return false;
+    }
+    
+    double stopDistance = atr * m_settings.atrMultiplier;
+    double price = marketBias ? symbolInfo.Ask() : symbolInfo.Bid();
+    double sl = marketBias ? price - stopDistance : price + stopDistance;
+    double tp = marketBias ? 
+                price + (price - sl) * m_settings.rrTarget : 
+                price - (sl - price) * m_settings.rrTarget;
+    
+    // Normalize prices
+    sl = NormalizeDouble(sl, symbolInfo.Digits());
+    tp = NormalizeDouble(tp, symbolInfo.Digits());
+    
+    ENUM_ORDER_TYPE orderType = marketBias ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
+    
+    trade.SetExpertMagicNumber(m_settings.magicNumber);
+    trade.SetDeviationInPoints(m_settings.slippage);
+    
+    bool result = false;
+    if(marketBias)
+        result = trade.Buy(m_settings.lotSize, m_symbol, price, sl, tp, "SMC Entry");
+    else
+        result = trade.Sell(m_settings.lotSize, m_symbol, price, sl, tp, "SMC Entry");
+    
+    if(result)
+    {
+        Print("Trade Placed Successfully: ", m_symbol, 
+              " | Ticket: ", trade.ResultDeal(),
+              " | Price: ", price,
+              " | SL: ", sl,
+              " | TP: ", tp);
+        return true;
+    }
+    else
+    {
+        Print("Trade Failed: ", trade.ResultRetcode(), " - ", trade.ResultComment());
+        return false;
+    }
+}
+//+------------------------------------------------------------------+
+//|                    DASHBOARD FUNCTIONS                           |
+//+------------------------------------------------------------------+
+void CSMCTradingSystem::CreateDashboard()
+{
+    // Create main panel
+    string panelName = "SMC_PANEL";
+    ObjectCreate(0, panelName, OBJ_RECTANGLE_LABEL, 0, 0, 0);
+    ObjectSetInteger(0, panelName, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+    ObjectSetInteger(0, panelName, OBJPROP_XDISTANCE, 10);
+    ObjectSetInteger(0, panelName, OBJPROP_YDISTANCE, 30);
+    ObjectSetInteger(0, panelName, OBJPROP_XSIZE, 280);
+    ObjectSetInteger(0, panelName, OBJPROP_YSIZE, 200);
+    ObjectSetInteger(0, panelName, OBJPROP_BGCOLOR, clrBlack);
+    ObjectSetInteger(0, panelName, OBJPROP_BORDER_TYPE, BORDER_RAISED);
+    ObjectSetInteger(0, panelName, OBJPROP_BORDER_COLOR, clrDarkGray);
+    ObjectSetInteger(0, panelName, OBJPROP_BACK, true);
+    
+    // Create symbol buttons
+    int buttonX = 10;
+    for(int i = 0; i < ArraySize(m_symbolList); i++)
+    {
+        string buttonId = "SYM_BTN_" + IntegerToString(i);
+        ObjectCreate(0, buttonId, OBJ_BUTTON, 0, 0, 0);
+        ObjectSetInteger(0, buttonId, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+        ObjectSetInteger(0, buttonId, OBJPROP_XDISTANCE, buttonX);
+        ObjectSetInteger(0, buttonId, OBJPROP_YDISTANCE, 5);
+        ObjectSetInteger(0, buttonId, OBJPROP_XSIZE, 85);
+        ObjectSetInteger(0, buttonId, OBJPROP_YSIZE, 22);
+        ObjectSetInteger(0, buttonId, OBJPROP_FONTSIZE, 10);
+        ObjectSetInteger(0, buttonId, OBJPROP_BGCOLOR, 
+                        i == m_selectedSymbolIndex ? clrDarkGreen : clrDimGray);
+        ObjectSetString(0, buttonId, OBJPROP_TEXT, m_symbolList[i]);
+        ObjectSetString(0, buttonId, OBJPROP_FONT, "Arial");
+        buttonX += 90;
+    }
+    
+    UpdateDashboard();
+}
+
+void CSMCTradingSystem::UpdateDashboard()
+{
+    string labels[8];
+    color colors[8];
+    
+    // Prepare display data
+    string htfBias = m_HTFStructure.isBullish ? "BULLISH" : "BEARISH";
+    string ltfBias = m_LTFStructure.isBullish ? "BULLISH" : "BEARISH";
+    string internalBias = m_InternalStructure.isBullish ? "YES" : "NO";
+    string liquiditySweep = m_liquidityZone.isSwept ? "YES" : "NO";
+    bool execReady = ShouldExecuteTrade();
+    
+    labels[0] = "Symbol: " + m_symbol;
+    labels[1] = "HTF Bias: " + htfBias;
+    labels[2] = "LTF Bias: " + ltfBias;
+    labels[3] = "Internal BoS: " + internalBias;
+    labels[4] = "Liquidity Sweep: " + liquiditySweep;
+    labels[5] = "Ready to Execute: " + (execReady ? "YES" : "NO");
+    labels[6] = "Spread: " + IntegerToString((int)symbolInfo.Spread());
+    labels[7] = "Time: " + TimeToString(TimeLocal(), TIME_MINUTES | TIME_SECONDS);
+    
+    colors[0] = clrWhite;
+    colors[1] = m_HTFStructure.isBullish ? clrLime : clrTomato;
+    colors[2] = m_LTFStructure.isBullish ? clrLime : clrTomato;
+    colors[3] = m_InternalStructure.isBullish ? clrLime : clrRed;
+    colors[4] = m_liquidityZone.isSwept ? clrOrange : clrGray;
+    colors[5] = execReady ? clrDeepSkyBlue : clrDimGray;
+    colors[6] = clrSilver;
+    colors[7] = clrSilver;
+    
+    // Update labels
+    int yPos = 45;
+    for(int i = 0; i < 8; i++)
+    {
+        string labelId = "SMC_LABEL_" + IntegerToString(i);
+        
+        if(ObjectFind(0, labelId) < 0)
+        {
+            ObjectCreate(0, labelId, OBJ_LABEL, 0, 0, 0);
+            ObjectSetInteger(0, labelId, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+            ObjectSetInteger(0, labelId, OBJPROP_XDISTANCE, 20);
+            ObjectSetInteger(0, labelId, OBJPROP_FONTSIZE, 10);
+            ObjectSetString(0, labelId, OBJPROP_FONT, "Arial");
+        }
+        
+        ObjectSetInteger(0, labelId, OBJPROP_YDISTANCE, yPos);
+        ObjectSetInteger(0, labelId, OBJPROP_COLOR, colors[i]);
+        ObjectSetString(0, labelId, OBJPROP_TEXT, labels[i]);
+        
+        yPos += 20;
+    }
+    
+    ChartRedraw(0);
+}
+
+void CSMCTradingSystem::CheckSymbolButtonClicks()
+{
+    for(int i = 0; i < ArraySize(m_symbolList); i++)
+    {
+        string buttonId = "SYM_BTN_" + IntegerToString(i);
+        
+        if(ObjectGetInteger(0, buttonId, OBJPROP_STATE))
+        {
+            SwitchSymbol(i);
+            ObjectSetInteger(0, buttonId, OBJPROP_STATE, false);
+            
+            // Update button colors
+            for(int j = 0; j < ArraySize(m_symbolList); j++)
+            {
+                string btnId = "SYM_BTN_" + IntegerToString(j);
+                ObjectSetInteger(0, btnId, OBJPROP_BGCOLOR, 
+                               j == i ? clrDarkGreen : clrDimGray);
+            }
+            break;
+        }
+    }
+}
+
+void CSMCTradingSystem::SwitchSymbol(int index)
+{
+    if(index >= 0 && index < ArraySize(m_symbolList))
+    {
+        m_selectedSymbolIndex = index;
+        m_symbol = m_symbolList[index];
+        
+        // Reinitialize for new symbol
+        Initialize(m_symbol, m_HTF, m_LTF);
+        
+        // Reset structures for new symbol
+        m_HTFStructure.Reset();
+        m_LTFStructure.Reset();
+        m_InternalStructure.Reset();
+        
+        // Clear zones
+        ArrayInitialize(m_recentOBs, 0);
+        ArrayInitialize(m_recentFVGs, 0);
+        
+        Print("Switched to symbol: ", m_symbol);
+    }
+}
+
+//+------------------------------------------------------------------+
+//|                    GLOBAL INSTANCE                               |
+//+------------------------------------------------------------------+
+CSMCTradingSystem* g_SMCSystem = NULL;
+
+//+------------------------------------------------------------------+
+//|                    HELPER FUNCTIONS                              |
+//+------------------------------------------------------------------+
+bool InitializeSMCSystem(string symbol, ENUM_TIMEFRAMES htf, ENUM_TIMEFRAMES ltf)
+{
+    if(g_SMCSystem != NULL)
+        delete g_SMCSystem;
+    
+    g_SMCSystem = new CSMCTradingSystem();
+    
+    if(!g_SMCSystem.Initialize(symbol, htf, ltf))
+    {
+        delete g_SMCSystem;
+        g_SMCSystem = NULL;
+        return false;
+    }
+    
+    return true;
+}
+
+void UpdateSMCSystem()
+{
+    if(g_SMCSystem == NULL)
+        return;
+    
+    g_SMCSystem.UpdateMarketStructure();
+    g_SMCSystem.UpdateZones();
+    g_SMCSystem.FilterZones();
+    g_SMCSystem.UpdateDashboard();
+    g_SMCSystem.CheckSymbolButtonClicks();
+}
+
+bool CheckSMCSignal()
+{
+    if(g_SMCSystem == NULL)
+        return false;
+    
+    return g_SMCSystem.ShouldExecuteTrade();
+}
+
+bool ExecuteSMCTrade()
+{
+    if(g_SMCSystem == NULL)
+        return false;
+    
+    return g_SMCSystem.ExecuteTrade();
+}
+
+void DestroySMCSystem()
+{
+    if(g_SMCSystem != NULL)
+    {
+        delete g_SMCSystem;
+        g_SMCSystem = NULL;
+    }
+}
+
+//+------------------------------------------------------------------+
