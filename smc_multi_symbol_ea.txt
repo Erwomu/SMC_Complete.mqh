@@ -1,0 +1,897 @@
+//+------------------------------------------------------------------+
+//|                                           SMC_MultiSymbol_EA.mq5 |
+//|                    Smart Money Concepts Multi-Symbol Expert      |
+//|                         Complete Trading System                  |
+//+------------------------------------------------------------------+
+#property copyright "SMC Multi-Symbol Trading System"
+#property link      "https://www.mql5.com"
+#property version   "2.00"
+#property description "Smart Money Concepts Multi-Symbol Trading EA"
+#property description "Trades multiple symbols using SMC methodology"
+
+#include <SMC_MultiSymbol.mqh>
+
+//+------------------------------------------------------------------+
+//|                        INPUT PARAMETERS                          |
+//+------------------------------------------------------------------+
+// === Timeframe Settings ===
+input group "Timeframe Configuration"
+input ENUM_TIMEFRAMES Input_HTF = PERIOD_H4;           // Higher Timeframe
+input ENUM_TIMEFRAMES Input_LTF = PERIOD_M15;          // Lower Timeframe
+
+// === Trading Filters ===
+input group "Trading Filters"
+input bool Use_EngulfingConfirmation = true;           // Use Engulfing Pattern
+input bool Use_PinBarConfirmation = true;              // Use Pin Bar Pattern
+input bool Require_InternalBoS = true;                 // Require Internal Break of Structure
+input bool Require_LiquiditySweep = false;             // Require Liquidity Sweep
+
+// === Zone Settings ===
+input group "Zone Detection"
+input bool Enable_OB_Entries = true;                   // Enable Order Block Entries
+input bool Enable_FVG_Entries = true;                  // Enable Fair Value Gap Entries
+input double OB_ZoneScoreWeight = 1.2;                 // Order Block Weight (0.5-2.0)
+input double FVG_ZoneScoreWeight = 1.0;                // FVG Zone Weight (0.5-2.0)
+
+// === Risk Management ===
+input group "Risk Management"
+input double ATR_SL_Multiplier = 1.5;                  // ATR Stop Loss Multiplier
+input double RR_Target = 3.0;                          // Risk:Reward Target Ratio
+input double LotSize = 0.01;                           // Fixed Lot Size
+
+// === Symbol Management ===
+input group "Symbol Configuration"
+input string Symbol_List = "EURUSD,GBPUSD,USDJPY,AUDUSD,USDCAD,NZDUSD,USDCHF,XAUUSD"; // Symbols to Trade (comma-separated)
+input bool Trade_All_Symbols = true;                   // Trade All Symbols Simultaneously
+input int Max_Symbols = 10;                            // Maximum Number of Symbols
+
+// === Dashboard Settings ===
+input group "Dashboard"
+input bool Show_Dashboard = true;                      // Show Dashboard
+input bool Show_Symbol_Switcher = true;                // Show Symbol Switcher
+input int Dashboard_Update_Seconds = 1;                // Dashboard Update Interval (seconds)
+
+// === EA Settings ===
+input group "Expert Advisor"
+input int Magic_Number = 20240101;                     // Magic Number
+input int Max_Slippage = 10;                          // Maximum Slippage (points)
+input bool Enable_Notifications = true;                // Enable Push Notifications
+input bool Enable_Email_Alerts = false;                // Enable Email Alerts
+input bool Debug_Mode = false;                        // Debug Mode (verbose logging)
+
+//+------------------------------------------------------------------+
+//|                      GLOBAL VARIABLES                            |
+//+------------------------------------------------------------------+
+string g_symbolArray[];                                // Array of trading symbols
+int g_symbolCount = 0;                                 // Number of symbols
+datetime g_lastDashboardUpdate = 0;                    // Last dashboard update time
+datetime g_lastNotification = 0;                       // Last notification time
+int g_totalTrades = 0;                                 // Total trades executed
+int g_winningTrades = 0;                               // Winning trades
+int g_losingTrades = 0;                                // Losing trades
+
+//+------------------------------------------------------------------+
+//|                    EXPERT INITIALIZATION                         |
+//+------------------------------------------------------------------+
+int OnInit()
+{
+    // Parse symbol list
+    if(!ParseSymbolList(Symbol_List, g_symbolArray, g_symbolCount))
+    {
+        Print("ERROR: Failed to parse symbol list");
+        return INIT_FAILED;
+    }
+    
+    // Validate symbols
+    for(int i = 0; i < g_symbolCount; i++)
+    {
+        if(!SymbolSelect(g_symbolArray[i], true))
+        {
+            Print("ERROR: Failed to select symbol: ", g_symbolArray[i]);
+            return INIT_FAILED;
+        }
+        
+        // Check if symbol exists
+        double bid = SymbolInfoDouble(g_symbolArray[i], SYMBOL_BID);
+        if(bid <= 0)
+        {
+            Print("ERROR: Invalid symbol: ", g_symbolArray[i]);
+            return INIT_FAILED;
+        }
+    }
+    
+    // Initialize Multi-Symbol SMC System
+    if(!InitializeMultiSMC(g_symbolArray, g_symbolCount))
+    {
+        Print("ERROR: Failed to initialize Multi-Symbol SMC system");
+        return INIT_FAILED;
+    }
+    
+    // Configure SMC Settings
+    SMC_Settings settings;
+    settings.HTF = Input_HTF;
+    settings.LTF = Input_LTF;
+    settings.useEngulfing = Use_EngulfingConfirmation;
+    settings.usePinBar = Use_PinBarConfirmation;
+    settings.requireInternalBoS = Require_InternalBoS;
+    settings.requireLiquiditySweep = Require_LiquiditySweep;
+    settings.enableOBs = Enable_OB_Entries;
+    settings.enableFVGs = Enable_FVG_Entries;
+    settings.obWeight = OB_ZoneScoreWeight;
+    settings.fvgWeight = FVG_ZoneScoreWeight;
+    settings.atrMultiplier = ATR_SL_Multiplier;
+    settings.rrTarget = RR_Target;
+    settings.lotSize = LotSize;
+    settings.magicNumber = Magic_Number;
+    settings.slippage = Max_Slippage;
+    settings.maxSymbols = Max_Symbols;
+    settings.tradeAllSymbols = Trade_All_Symbols;
+    
+    g_MultiSMC.SetParameters(settings);
+    
+    // Set chart properties
+    ChartSetInteger(0, CHART_SHOW_GRID, false);
+    ChartSetInteger(0, CHART_SHOW_VOLUMES, false);
+    
+    // Display initialization message
+    string initMsg = StringFormat("SMC Multi-Symbol EA Initialized\n" +
+                                  "Symbols: %d\n" +
+                                  "HTF: %s | LTF: %s\n" +
+                                  "Magic: %d",
+                                  g_symbolCount,
+                                  EnumToString(Input_HTF),
+                                  EnumToString(Input_LTF),
+                                  Magic_Number);
+    
+    Comment(initMsg);
+    Print(initMsg);
+    
+    // Send initialization notification
+    if(Enable_Notifications)
+    {
+        SendNotification("SMC EA Started - " + IntegerToString(g_symbolCount) + " symbols");
+    }
+    
+    // Start timer for dashboard updates
+    EventSetTimer(Dashboard_Update_Seconds);
+    
+    return INIT_SUCCEEDED;
+}
+
+//+------------------------------------------------------------------+
+//|                    EXPERT DEINITIALIZATION                       |
+//+------------------------------------------------------------------+
+void OnDeinit(const int reason)
+{
+    // Kill timer
+    EventKillTimer();
+    
+    // Clean up SMC system
+    DestroyMultiSMC();
+    
+    // Clear chart
+    Comment("");
+    ObjectsDeleteAll(0);
+    
+    // Print final statistics
+    string stats = StringFormat("EA Stopped. Statistics:\n" +
+                               "Total Trades: %d\n" +
+                               "Winners: %d\n" +
+                               "Losers: %d\n" +
+                               "Win Rate: %.2f%%",
+                               g_totalTrades,
+                               g_winningTrades,
+                               g_losingTrades,
+                               g_totalTrades > 0 ? (double)g_winningTrades/g_totalTrades*100 : 0);
+    
+    Print(stats);
+    
+    // Send shutdown notification
+    if(Enable_Notifications && g_totalTrades > 0)
+    {
+        SendNotification("SMC EA Stopped - " + IntegerToString(g_totalTrades) + " trades");
+    }
+}
+
+//+------------------------------------------------------------------+
+//|                        MAIN TICK FUNCTION                        |
+//+------------------------------------------------------------------+
+void OnTick()
+{
+    // Safety check
+    if(g_MultiSMC == NULL)
+    {
+        Print("ERROR: SMC system not initialized");
+        return;
+    }
+    
+    // Update all symbols and check for signals
+    UpdateMultiSMC();
+    
+    // Monitor existing positions
+    MonitorPositions();
+    
+    // Update statistics
+    UpdateTradeStatistics();
+    
+    // Check for important events
+    CheckMarketEvents();
+    
+    // Debug output
+    if(Debug_Mode && MQLInfoInteger(MQL_TESTER) == 0)
+    {
+        static datetime lastDebug = 0;
+        if(TimeCurrent() - lastDebug >= 60) // Every minute
+        {
+            PrintDebugInfo();
+            lastDebug = TimeCurrent();
+        }
+    }
+}
+
+//+------------------------------------------------------------------+
+//|                        TIMER FUNCTION                            |
+//+------------------------------------------------------------------+
+void OnTimer()
+{
+    // Update dashboard
+    if(Show_Dashboard && g_MultiSMC != NULL)
+    {
+        g_MultiSMC.UpdateDashboard();
+        g_lastDashboardUpdate = TimeCurrent();
+    }
+    
+    // Display account info
+    DisplayAccountInfo();
+}
+
+//+------------------------------------------------------------------+
+//|                     TRADE TRANSACTION                            |
+//+------------------------------------------------------------------+
+void OnTradeTransaction(const MqlTradeTransaction& trans,
+                       const MqlTradeRequest& request,
+                       const MqlTradeResult& result)
+{
+    // Handle new position opened
+    if(trans.type == TRADE_TRANSACTION_DEAL_ADD)
+    {
+        if(trans.deal_type == DEAL_TYPE_BUY || trans.deal_type == DEAL_TYPE_SELL)
+        {
+            g_totalTrades++;
+            
+            string msg = StringFormat("New %s position opened on %s at %.5f",
+                                     trans.deal_type == DEAL_TYPE_BUY ? "BUY" : "SELL",
+                                     trans.symbol,
+                                     trans.price);
+            
+            Print(msg);
+            
+            if(Enable_Notifications && TimeCurrent() - g_lastNotification > 60)
+            {
+                SendNotification(msg);
+                g_lastNotification = TimeCurrent();
+            }
+            
+            if(Enable_Email_Alerts)
+            {
+                SendMail("SMC EA Trade Alert", msg);
+            }
+        }
+    }
+}
+
+//+------------------------------------------------------------------+
+//|                      HELPER FUNCTIONS                            |
+//+------------------------------------------------------------------+
+
+// Parse comma-separated symbol list
+bool ParseSymbolList(string symbolList, string &symbols[], int &count)
+{
+    // Remove spaces
+    StringReplace(symbolList, " ", "");
+    
+    // Split by comma
+    string sep = ",";
+    ushort u_sep = StringGetCharacter(sep, 0);
+    int splits = StringSplit(symbolList, u_sep, symbols);
+    
+    if(splits <= 0)
+    {
+        // If no commas, assume single symbol
+        ArrayResize(symbols, 1);
+        symbols[0] = symbolList;
+        count = 1;
+    }
+    else
+    {
+        count = splits;
+    }
+    
+    // Validate count
+    if(count > Max_Symbols)
+    {
+        Print("Symbol count exceeds maximum: ", Max_Symbols);
+        count = Max_Symbols;
+        ArrayResize(symbols, count);
+    }
+    
+    return count > 0;
+}
+
+// Monitor open positions
+void MonitorPositions()
+{
+    for(int i = PositionsTotal() - 1; i >= 0; i--)
+    {
+        CPositionInfo position;
+        if(!position.SelectByIndex(i)) continue;
+        
+        if(position.Magic() != Magic_Number) continue;
+        
+        // Calculate position metrics
+        double profit = position.Profit();
+        double points = 0;
+        
+        if(position.PositionType() == POSITION_TYPE_BUY)
+        {
+            points = (position.PriceCurrent() - position.PriceOpen()) / 
+                    SymbolInfoDouble(position.Symbol(), SYMBOL_POINT);
+        }
+        else
+        {
+            points = (position.PriceOpen() - position.PriceCurrent()) / 
+                    SymbolInfoDouble(position.Symbol(), SYMBOL_POINT);
+        }
+        
+        // Optional: Implement trailing stop or breakeven logic here
+        if(points > 50) // Example: 50 points in profit
+        {
+            // Move stop to breakeven
+            double newSL = position.PriceOpen();
+            if(position.PositionType() == POSITION_TYPE_SELL)
+            {
+                if(newSL < position.StopLoss() || position.StopLoss() == 0)
+                {
+                    trade.PositionModify(position.Ticket(), newSL, position.TakeProfit());
+                }
+            }
+            else
+            {
+                if(newSL > position.StopLoss() || position.StopLoss() == 0)
+                {
+                    trade.PositionModify(position.Ticket(), newSL, position.TakeProfit());
+                }
+            }
+        }
+    }
+}
+
+// Update trade statistics
+void UpdateTradeStatistics()
+{
+    static int lastHistoryTotal = 0;
+    int currentHistoryTotal = HistoryDealsTotal();
+    
+    if(currentHistoryTotal != lastHistoryTotal)
+    {
+        // Recalculate statistics
+        g_winningTrades = 0;
+        g_losingTrades = 0;
+        
+        HistorySelect(0, TimeCurrent());
+        
+        for(int i = HistoryDealsTotal() - 1; i >= 0; i--)
+        {
+            ulong ticket = HistoryDealGetTicket(i);
+            if(ticket <= 0) continue;
+            
+            if(HistoryDealGetInteger(ticket, DEAL_MAGIC) != Magic_Number) continue;
+            if(HistoryDealGetInteger(ticket, DEAL_ENTRY) != DEAL_ENTRY_OUT) continue;
+            
+            double profit = HistoryDealGetDouble(ticket, DEAL_PROFIT);
+            
+            if(profit > 0) g_winningTrades++;
+            else if(profit < 0) g_losingTrades++;
+        }
+        
+        lastHistoryTotal = currentHistoryTotal;
+    }
+}
+
+// Check for important market events
+void CheckMarketEvents()
+{
+    // Check for session changes
+    static int lastHour = -1;
+    MqlDateTime time;
+    TimeCurrent(time);
+    
+    if(time.hour != lastHour)
+    {
+        lastHour = time.hour;
+        
+        // London Session Start (8:00 GMT)
+        if(time.hour == 8)
+        {
+            Print("London Session Started - Increased volatility expected");
+        }
+        // New York Session Start (13:00 GMT)
+        else if(time.hour == 13)
+        {
+            Print("New York Session Started - Increased volatility expected");
+        }
+        // Asian Session Start (23:00 GMT)
+        else if(time.hour == 23)
+        {
+            Print("Asian Session Started - Lower volatility expected");
+        }
+    }
+    
+    // Check for weekend
+    if(time.day_of_week == 5 && time.hour >= 20)
+    {
+        Print("Weekend approaching - Consider closing positions");
+    }
+}
+
+// Display account information
+void DisplayAccountInfo()
+{
+    if(!Show_Dashboard) return;
+    
+    double balance = AccountInfoDouble(ACCOUNT_BALANCE);
+    double equity = AccountInfoDouble(ACCOUNT_EQUITY);
+    double margin = AccountInfoDouble(ACCOUNT_MARGIN);
+    double freeMargin = AccountInfoDouble(ACCOUNT_MARGIN_FREE);
+    double marginLevel = AccountInfoDouble(ACCOUNT_MARGIN_LEVEL);
+    double drawdown = equity < balance ? (balance - equity) / balance * 100 : 0;
+    
+    int openPositions = 0;
+    double floatingPL = 0;
+    
+    for(int i = PositionsTotal() - 1; i >= 0; i--)
+    {
+        CPositionInfo position;
+        if(position.SelectByIndex(i))
+        {
+            if(position.Magic() == Magic_Number)
+            {
+                openPositions++;
+                floatingPL += position.Profit() + position.Swap() + position.Commission();
+            }
+        }
+    }
+    
+    string info = StringFormat(
+        "\n\n════════ ACCOUNT INFO ════════\n" +
+        "Balance: %.2f %s\n" +
+        "Equity: %.2f %s\n" +
+        "Floating P/L: %.2f\n" +
+        "Drawdown: %.2f%%\n" +
+        "Margin Level: %.2f%%\n" +
+        "Open Positions: %d / %d symbols\n" +
+        "══════════════════════════\n" +
+        "Win Rate: %.1f%% (%d/%d trades)\n" +
+        "Session: %s\n" +
+        "EA Status: %s",
+        balance, AccountInfoString(ACCOUNT_CURRENCY),
+        equity, AccountInfoString(ACCOUNT_CURRENCY),
+        floatingPL,
+        drawdown,
+        marginLevel,
+        openPositions, g_symbolCount,
+        g_totalTrades > 0 ? (double)g_winningTrades/g_totalTrades*100 : 0.0,
+        g_winningTrades, g_totalTrades,
+        GetCurrentSession(),
+        IsTradeAllowed() ? "ACTIVE" : "TRADING DISABLED"
+    );
+    
+    Comment(info);
+}
+
+// Get current trading session
+string GetCurrentSession()
+{
+    MqlDateTime time;
+    TimeCurrent(time);
+    int hour = time.hour;
+    
+    // Adjust for broker timezone if needed
+    if(hour >= 23 || hour < 8)
+        return "ASIAN";
+    else if(hour >= 8 && hour < 13)
+        return "LONDON";
+    else if(hour >= 13 && hour < 22)
+        return "NEW YORK";
+    else
+        return "OVERLAP";
+}
+
+// Print debug information
+void PrintDebugInfo()
+{
+    if(g_MultiSMC == NULL) return;
+    
+    Print("═══════════════ DEBUG INFO ═══════════════");
+    
+    for(int i = 0; i < g_symbolCount; i++)
+    {
+        string symbol = g_symbolArray[i];
+        string status = g_MultiSMC.GetSymbolStatus(symbol);
+        
+        Print(symbol, " - ", status);
+        
+        // Additional debug info
+        if(Debug_Mode)
+        {
+            bool htfBias = g_MultiSMC.GetHTFBias(symbol);
+            bool ltfBias = g_MultiSMC.GetLTFBias(symbol);
+            
+            Print("  HTF Bias: ", htfBias ? "Bullish" : "Bearish",
+                  " | LTF Bias: ", ltfBias ? "Bullish" : "Bearish");
+        }
+    }
+    
+    Print("Active Positions: ", g_MultiSMC.GetActiveTradeCount());
+    Print("═════════════════════════════════════════");
+}
+
+// Check if trading is allowed
+bool IsTradeAllowed()
+{
+    // Check if auto trading is enabled
+    if(!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED))
+    {
+        Print("Auto trading is disabled in terminal");
+        return false;
+    }
+    
+    // Check if EA trading is allowed
+    if(!MQLInfoInteger(MQL_TRADE_ALLOWED))
+    {
+        Print("EA trading is not allowed");
+        return false;
+    }
+    
+    // Check account trade mode
+    ENUM_ACCOUNT_TRADE_MODE tradeMode = (ENUM_ACCOUNT_TRADE_MODE)AccountInfoInteger(ACCOUNT_TRADE_MODE);
+    if(tradeMode == ACCOUNT_TRADE_MODE_DEMO)
+    {
+        // Demo account - trading allowed
+        return true;
+    }
+    else if(tradeMode == ACCOUNT_TRADE_MODE_CONTEST)
+    {
+        // Contest account - trading allowed
+        return true;
+    }
+    else if(tradeMode == ACCOUNT_TRADE_MODE_REAL)
+    {
+        // Real account - check additional conditions
+        if(!AccountInfoInteger(ACCOUNT_TRADE_ALLOWED))
+        {
+            Print("Trading not allowed on this account");
+            return false;
+        }
+    }
+    
+    return true;
+}
+
+//+------------------------------------------------------------------+
+//|                    CHART EVENT HANDLING                          |
+//+------------------------------------------------------------------+
+void OnChartEvent(const int id,
+                  const long &lparam,
+                  const double &dparam,
+                  const string &sparam)
+{
+    if(g_MultiSMC == NULL) return;
+    
+    // Handle button clicks
+    if(id == CHARTEVENT_OBJECT_CLICK)
+    {
+        // Check for symbol button clicks
+        if(StringFind(sparam, "MS_BTN_") >= 0)
+        {
+            g_MultiSMC.UpdateDashboard();
+        }
+        
+        // Add custom button handlers here
+        if(sparam == "CLOSE_ALL_BTN")
+        {
+            if(MessageBox("Close all positions?", "Confirm", MB_YESNO) == IDYES)
+            {
+                g_MultiSMC.CloseAllPositions();
+            }
+        }
+    }
+    
+    // Handle keyboard events
+    if(id == CHARTEVENT_KEYDOWN)
+    {
+        switch((int)lparam)
+        {
+            case 'D': // Toggle dashboard
+                Show_Dashboard = !Show_Dashboard;
+                if(!Show_Dashboard)
+                    ObjectsDeleteAll(0, "MS_");
+                else
+                    g_MultiSMC.CreateMultiSymbolDashboard();
+                break;
+                
+            case 'S': // Force scan all symbols
+                g_MultiSMC.ScanAllSymbolsForSignals();
+                Print("Manual scan completed");
+                break;
+                
+            case 'I': // Show info
+                PrintDebugInfo();
+                break;
+        }
+    }
+}
+
+//+------------------------------------------------------------------+
+//|                  OPTIMIZATION FUNCTIONS                          |
+//+------------------------------------------------------------------+
+double OnTester()
+{
+    // Custom optimization criterion
+    double winRate = g_totalTrades > 0 ? (double)g_winningTrades / g_totalTrades : 0;
+    double avgTrades = (double)g_totalTrades / g_symbolCount;
+    
+    // Balance win rate with number of trades
+    double score = winRate * 100 + avgTrades * 0.1;
+    
+    return score;
+}
+
+void OnTesterInit()
+{
+    // Initialize tester-specific settings
+    Print("Tester initialized for ", g_symbolCount, " symbols");
+}
+
+void OnTesterDeinit()
+{
+    // Print final tester statistics
+    Print("═════════ BACKTEST RESULTS ═════════");
+    Print("Total Trades: ", g_totalTrades);
+    Print("Winning Trades: ", g_winningTrades);
+    Print("Losing Trades: ", g_losingTrades);
+    Print("Win Rate: ", g_totalTrades > 0 ? 
+          DoubleToString((double)g_winningTrades/g_totalTrades*100, 2) + "%" : "N/A");
+    Print("══════════════════════════════════");
+}
+
+//+------------------------------------------------------------------+
+//|              ADDITIONAL SMC HELPER FUNCTIONS                     |
+//+------------------------------------------------------------------+
+
+// Validate timeframe combination
+bool ValidateTimeframes(ENUM_TIMEFRAMES htf, ENUM_TIMEFRAMES ltf)
+{
+    int htfMinutes = PeriodSeconds(htf) / 60;
+    int ltfMinutes = PeriodSeconds(ltf) / 60;
+    
+    if(htfMinutes <= ltfMinutes)
+    {
+        Alert("ERROR: HTF must be larger than LTF");
+        return false;
+    }
+    
+    if(htfMinutes < ltfMinutes * 4)
+    {
+        Alert("WARNING: HTF should be at least 4x larger than LTF for optimal results");
+    }
+    
+    return true;
+}
+
+// Emergency stop function
+void EmergencyStop()
+{
+    Print("EMERGENCY STOP ACTIVATED");
+    
+    // Close all positions
+    if(g_MultiSMC != NULL)
+    {
+        g_MultiSMC.CloseAllPositions();
+    }
+    
+    // Remove EA
+    ExpertRemove();
+}
+
+// Check for news events (simplified)
+bool IsHighImpactNewsTime()
+{
+    MqlDateTime time;
+    TimeCurrent(time);
+    
+    // NFP - First Friday of month at 13:30 GMT
+    if(time.day_of_week == 5 && time.day <= 7 && 
+       time.hour == 13 && time.min >= 25 && time.min <= 35)
+    {
+        return true;
+    }
+    
+    // FOMC - Wednesdays at 19:00 GMT (simplified check)
+    if(time.day_of_week == 3 && time.hour == 19 && time.min <= 5)
+    {
+        return true;
+    }
+    
+    return false;
+}
+
+// Calculate daily profit
+double CalculateDailyProfit()
+{
+    double dailyProfit = 0;
+    
+    datetime dayStart = iTime(_Symbol, PERIOD_D1, 0);
+    HistorySelect(dayStart, TimeCurrent());
+    
+    for(int i = HistoryDealsTotal() - 1; i >= 0; i--)
+    {
+        ulong ticket = HistoryDealGetTicket(i);
+        if(ticket <= 0) continue;
+        
+        if(HistoryDealGetInteger(ticket, DEAL_MAGIC) != Magic_Number) continue;
+        if(HistoryDealGetInteger(ticket, DEAL_ENTRY) != DEAL_ENTRY_OUT) continue;
+        
+        dailyProfit += HistoryDealGetDouble(ticket, DEAL_PROFIT);
+        dailyProfit += HistoryDealGetDouble(ticket, DEAL_SWAP);
+        dailyProfit += HistoryDealGetDouble(ticket, DEAL_COMMISSION);
+    }
+    
+    return dailyProfit;
+}
+
+// Risk management check
+bool RiskManagementCheck()
+{
+    // Check drawdown limit
+    double equity = AccountInfoDouble(ACCOUNT_EQUITY);
+    double balance = AccountInfoDouble(ACCOUNT_BALANCE);
+    double drawdown = (balance - equity) / balance * 100;
+    
+    if(drawdown > 20) // 20% drawdown limit
+    {
+        Print("WARNING: Drawdown exceeds 20% - ", DoubleToString(drawdown, 2), "%");
+        return false;
+    }
+    
+    // Check daily loss limit
+    double dailyProfit = CalculateDailyProfit();
+    double dailyLossLimit = balance * 0.05; // 5% daily loss limit
+    
+    if(dailyProfit < -dailyLossLimit)
+    {
+        Print("Daily loss limit reached: ", DoubleToString(dailyProfit, 2));
+        return false;
+    }
+    
+    // Check margin level
+    double marginLevel = AccountInfoDouble(ACCOUNT_MARGIN_LEVEL);
+    if(marginLevel > 0 && marginLevel < 200)
+    {
+        Print("WARNING: Low margin level - ", DoubleToString(marginLevel, 2), "%");
+        return false;
+    }
+    
+    return true;
+}
+
+//+------------------------------------------------------------------+
+//|                    POSITION SIZING FUNCTIONS                     |
+//+------------------------------------------------------------------+
+
+// Calculate lot size based on risk percentage
+double CalculateLotSize(string symbol, double riskPercent, double stopLossPoints)
+{
+    if(stopLossPoints <= 0) return 0.01; // Minimum lot
+    
+    double accountBalance = AccountInfoDouble(ACCOUNT_BALANCE);
+    double riskAmount = accountBalance * (riskPercent / 100.0);
+    
+    double tickValue = SymbolInfoDouble(symbol, SYMBOL_TRADE_TICK_VALUE);
+    double tickSize = SymbolInfoDouble(symbol, SYMBOL_TRADE_TICK_SIZE);
+    double point = SymbolInfoDouble(symbol, SYMBOL_POINT);
+    
+    if(tickValue <= 0 || tickSize <= 0) return 0.01;
+    
+    double stopLossValue = stopLossPoints * point;
+    double lotSize = riskAmount / (stopLossValue / tickSize * tickValue);
+    
+    // Normalize lot size
+    double minLot = SymbolInfoDouble(symbol, SYMBOL_VOLUME_MIN);
+    double maxLot = SymbolInfoDouble(symbol, SYMBOL_VOLUME_MAX);
+    double lotStep = SymbolInfoDouble(symbol, SYMBOL_VOLUME_STEP);
+    
+    lotSize = MathMax(minLot, lotSize);
+    lotSize = MathMin(maxLot, lotSize);
+    lotSize = MathRound(lotSize / lotStep) * lotStep;
+    
+    return NormalizeDouble(lotSize, 2);
+}
+
+//+------------------------------------------------------------------+
+//|                    PERFORMANCE METRICS                           |
+//+------------------------------------------------------------------+
+
+// Calculate Sharpe Ratio (simplified)
+double CalculateSharpeRatio()
+{
+    if(g_totalTrades < 20) return 0; // Need minimum trades
+    
+    double returns[];
+    ArrayResize(returns, g_totalTrades);
+    
+    HistorySelect(0, TimeCurrent());
+    int index = 0;
+    
+    for(int i = 0; i < HistoryDealsTotal() && index < g_totalTrades; i++)
+    {
+        ulong ticket = HistoryDealGetTicket(i);
+        if(ticket <= 0) continue;
+        
+        if(HistoryDealGetInteger(ticket, DEAL_MAGIC) != Magic_Number) continue;
+        if(HistoryDealGetInteger(ticket, DEAL_ENTRY) != DEAL_ENTRY_OUT) continue;
+        
+        returns[index++] = HistoryDealGetDouble(ticket, DEAL_PROFIT);
+    }
+    
+    if(index == 0) return 0;
+    
+    // Calculate average return
+    double avgReturn = 0;
+    for(int i = 0; i < index; i++)
+        avgReturn += returns[i];
+    avgReturn /= index;
+    
+    // Calculate standard deviation
+    double variance = 0;
+    for(int i = 0; i < index; i++)
+        variance += MathPow(returns[i] - avgReturn, 2);
+    variance /= index;
+    
+    double stdDev = MathSqrt(variance);
+    
+    if(stdDev == 0) return 0;
+    
+    return avgReturn / stdDev;
+}
+
+// Calculate profit factor
+double CalculateProfitFactor()
+{
+    double grossProfit = 0;
+    double grossLoss = 0;
+    
+    HistorySelect(0, TimeCurrent());
+    
+    for(int i = 0; i < HistoryDealsTotal(); i++)
+    {
+        ulong ticket = HistoryDealGetTicket(i);
+        if(ticket <= 0) continue;
+        
+        if(HistoryDealGetInteger(ticket, DEAL_MAGIC) != Magic_Number) continue;
+        if(HistoryDealGetInteger(ticket, DEAL_ENTRY) != DEAL_ENTRY_OUT) continue;
+        
+        double profit = HistoryDealGetDouble(ticket, DEAL_PROFIT);
+        
+        if(profit > 0)
+            grossProfit += profit;
+        else
+            grossLoss += MathAbs(profit);
+    }
+    
+    if(grossLoss == 0) return grossProfit > 0 ? 999.99 : 0;
+    
+    return grossProfit / grossLoss;
+}
+
+//+------------------------------------------------------------------+

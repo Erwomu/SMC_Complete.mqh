@@ -1,0 +1,1466 @@
+//+------------------------------------------------------------------+
+//|                                    SMC_MultiSymbol.mqh           |
+//|              Smart Money Concepts Multi-Symbol Trading Library   |
+//|                     Enhanced with Multi-Symbol Support           |
+//+------------------------------------------------------------------+
+#property copyright "SMC Multi-Symbol Trading System"
+#property version   "2.00"
+#property strict
+
+#include <Trade\Trade.mqh>
+#include <Trade\SymbolInfo.mqh>
+#include <Trade\PositionInfo.mqh>
+#include <Trade\OrderInfo.mqh>
+
+//+------------------------------------------------------------------+
+//|                        GLOBAL OBJECTS                            |
+//+------------------------------------------------------------------+
+CTrade trade;
+CPositionInfo positionInfo;
+COrderInfo orderInfo;
+
+//+------------------------------------------------------------------+
+//|                         DATA STRUCTURES                          |
+//+------------------------------------------------------------------+
+struct StructureState
+{
+    double lastHH;
+    double lastHL;
+    double lastLH;
+    double lastLL;
+    bool   isBullish;
+    bool   isInitialized;
+    datetime lastUpdate;
+    
+    void Reset()
+    {
+        lastHH = 0.0;
+        lastHL = 0.0;
+        lastLH = 0.0;
+        lastLL = 0.0;
+        isBullish = true;
+        isInitialized = false;
+        lastUpdate = 0;
+    }
+};
+
+struct OrderBlock
+{
+    double          high;
+    double          low;
+    double          bodyHigh;
+    double          bodyLow;
+    datetime        time;
+    bool            isBullish;
+    bool            isMitigated;
+    bool            isValid;
+    bool            filteredOut;
+    ENUM_TIMEFRAMES timeframe;
+    string          symbol;
+    
+    void Reset()
+    {
+        high = 0.0;
+        low = 0.0;
+        bodyHigh = 0.0;
+        bodyLow = 0.0;
+        time = 0;
+        isBullish = false;
+        isMitigated = false;
+        isValid = false;
+        filteredOut = false;
+        timeframe = PERIOD_CURRENT;
+        symbol = "";
+    }
+};
+
+struct FVGZone
+{
+    double          upper;
+    double          lower;
+    datetime        created;
+    bool            isBullish;
+    bool            isValid;
+    bool            filteredOut;
+    ENUM_TIMEFRAMES timeframe;
+    string          symbol;
+    
+    void Reset()
+    {
+        upper = 0.0;
+        lower = 0.0;
+        created = 0;
+        isBullish = false;
+        isValid = false;
+        filteredOut = false;
+        timeframe = PERIOD_CURRENT;
+        symbol = "";
+    }
+};
+
+struct LiquidityZone
+{
+    double   price;
+    datetime time;
+    bool     isHigh;
+    bool     isSwept;
+    string   symbol;
+    
+    void Reset()
+    {
+        price = 0.0;
+        time = 0;
+        isHigh = false;
+        isSwept = false;
+        symbol = "";
+    }
+};
+
+struct SMC_Settings
+{
+    ENUM_TIMEFRAMES HTF;
+    ENUM_TIMEFRAMES LTF;
+    bool            useEngulfing;
+    bool            usePinBar;
+    bool            requireInternalBoS;
+    bool            requireLiquiditySweep;
+    bool            enableOBs;
+    bool            enableFVGs;
+    double          obWeight;
+    double          fvgWeight;
+    double          atrMultiplier;
+    double          rrTarget;
+    double          lotSize;
+    int             magicNumber;
+    int             slippage;
+    int             maxSymbols;
+    bool            tradeAllSymbols;
+};
+
+struct SymbolData
+{
+    string          symbol;
+    StructureState  HTFStructure;
+    StructureState  LTFStructure;
+    StructureState  InternalStructure;
+    LiquidityZone   liquidityZones[];
+    OrderBlock      orderBlocks[];
+    FVGZone         fvgZones[];
+    double          lastHighSwing;
+    double          lastLowSwing;
+    datetime        lastTradeTime;
+    bool            isActive;
+    CSymbolInfo     symbolInfo;
+};
+
+//+------------------------------------------------------------------+
+//|                 MULTI-SYMBOL SMC TRADING CLASS                   |
+//+------------------------------------------------------------------+
+class CMultiSymbolSMC
+{
+private:
+    // Core settings
+    SMC_Settings    m_settings;
+    
+    // Symbol management
+    SymbolData      m_symbolData[];
+    string          m_symbolList[];
+    int             m_activeSymbolIndex;
+    int             m_totalSymbols;
+    
+    // Constants
+    static const int MAX_OBS_PER_SYMBOL = 10;
+    static const int MAX_FVGS_PER_SYMBOL = 10;
+    static const int MAX_LIQUIDITY_ZONES = 5;
+    
+    // Private methods for each symbol
+    bool   InitializeStructure(string symbol, ENUM_TIMEFRAMES tf, int bars, StructureState &state);
+    bool   UpdateStructureLogic(string symbol, ENUM_TIMEFRAMES tf, StructureState &state);
+    void   DetectOrderBlocksForSymbol(int symbolIndex, ENUM_TIMEFRAMES tf, int lookback);
+    void   DetectFVGZonesForSymbol(int symbolIndex, ENUM_TIMEFRAMES tf, int scanBars);
+    void   DetectLiquiditySweeps(int symbolIndex);
+    bool   ZonesOverlap(double top1, double bottom1, double top2, double bottom2);
+    void   FilterOverlappingZones(int symbolIndex);
+    int    GetBestOrderBlockIndex(int symbolIndex, bool isBullish);
+    int    GetBestFVGIndex(int symbolIndex, bool isBullish);
+    bool   IsPinBarPattern(string symbol, bool bullish, ENUM_TIMEFRAMES tf);
+    bool   IsEngulfingPattern(string symbol, bool bullish, ENUM_TIMEFRAMES tf);
+    bool   UpdateInternalBreakOfStructure(int symbolIndex, ENUM_TIMEFRAMES tf, bool bias);
+    double CalculateATR(string symbol, ENUM_TIMEFRAMES tf, int period);
+    void   UpdateLiquidityZones(int symbolIndex);
+    int    GetSymbolIndex(string symbol);
+    
+public:
+    // Constructor & Destructor
+    CMultiSymbolSMC();
+    ~CMultiSymbolSMC();
+    
+    // Initialization
+    bool   Initialize(const string &symbols[], int symbolCount);
+    void   SetParameters(const SMC_Settings &settings);
+    bool   AddSymbol(string symbol);
+    bool   RemoveSymbol(string symbol);
+    
+    // Core Trading Functions
+    void   UpdateAllSymbols();
+    void   UpdateSymbol(string symbol);
+    void   UpdateMarketStructure(string symbol);
+    void   UpdateZones(string symbol);
+    void   FilterZones(string symbol);
+    void   WatchForSweeps(string symbol);
+    bool   ShouldExecuteTrade(string symbol);
+    bool   ExecuteTrade(string symbol);
+    
+    // Multi-symbol specific
+    void   ScanAllSymbolsForSignals();
+    int    GetActiveTradeCount();
+    bool   HasOpenPosition(string symbol);
+    void   CloseAllPositions();
+    
+    // Dashboard Functions
+    void   CreateMultiSymbolDashboard();
+    void   UpdateDashboard();
+    void   SwitchActiveSymbol(int index);
+    string GetActiveSymbol() const;
+    
+    // Getters
+    bool   GetHTFBias(string symbol);
+    bool   GetLTFBias(string symbol);
+    int    GetTotalSymbols() const { return m_totalSymbols; }
+    void   GetSymbolList(string &symbols[]);
+    string GetSymbolStatus(string symbol);
+};
+
+//+------------------------------------------------------------------+
+//|                     IMPLEMENTATION                               |
+//+------------------------------------------------------------------+
+CMultiSymbolSMC::CMultiSymbolSMC()
+{
+    m_totalSymbols = 0;
+    m_activeSymbolIndex = 0;
+    
+    // Default settings
+    m_settings.HTF = PERIOD_H4;
+    m_settings.LTF = PERIOD_M15;
+    m_settings.useEngulfing = true;
+    m_settings.usePinBar = true;
+    m_settings.requireInternalBoS = true;
+    m_settings.requireLiquiditySweep = false;
+    m_settings.enableOBs = true;
+    m_settings.enableFVGs = true;
+    m_settings.obWeight = 1.0;
+    m_settings.fvgWeight = 0.8;
+    m_settings.atrMultiplier = 1.5;
+    m_settings.rrTarget = 3.0;
+    m_settings.lotSize = 0.01;
+    m_settings.magicNumber = 123456;
+    m_settings.slippage = 10;
+    m_settings.maxSymbols = 10;
+    m_settings.tradeAllSymbols = true;
+}
+
+CMultiSymbolSMC::~CMultiSymbolSMC()
+{
+    ObjectsDeleteAll(0, "SMC_");
+    ObjectsDeleteAll(0, "SYM_");
+    ObjectsDeleteAll(0, "MS_");
+}
+
+bool CMultiSymbolSMC::HasOpenPosition(string symbol)
+{
+    for(int i = PositionsTotal() - 1; i >= 0; i--)
+    {
+        if(positionInfo.SelectByIndex(i))
+        {
+            if(positionInfo.Symbol() == symbol && 
+               positionInfo.Magic() == m_settings.magicNumber)
+            {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+int CMultiSymbolSMC::GetActiveTradeCount()
+{
+    int count = 0;
+    for(int i = PositionsTotal() - 1; i >= 0; i--)
+    {
+        if(positionInfo.SelectByIndex(i))
+        {
+            if(positionInfo.Magic() == m_settings.magicNumber)
+            {
+                count++;
+            }
+        }
+    }
+    return count;
+}
+
+void CMultiSymbolSMC::CloseAllPositions()
+{
+    for(int i = PositionsTotal() - 1; i >= 0; i--)
+    {
+        if(positionInfo.SelectByIndex(i))
+        {
+            if(positionInfo.Magic() == m_settings.magicNumber)
+            {
+                trade.PositionClose(positionInfo.Ticket());
+            }
+        }
+    }
+}
+
+bool CMultiSymbolSMC::GetHTFBias(string symbol)
+{
+    int idx = GetSymbolIndex(symbol);
+    if(idx < 0) return false;
+    
+    return m_symbolData[idx].HTFStructure.isBullish;
+}
+
+bool CMultiSymbolSMC::GetLTFBias(string symbol)
+{
+    int idx = GetSymbolIndex(symbol);
+    if(idx < 0) return false;
+    
+    return m_symbolData[idx].LTFStructure.isBullish;
+}
+
+void CMultiSymbolSMC::GetSymbolList(string &symbols[])
+{
+    ArrayResize(symbols, m_totalSymbols);
+    for(int i = 0; i < m_totalSymbols; i++)
+    {
+        symbols[i] = m_symbolList[i];
+    }
+}
+
+string CMultiSymbolSMC::GetSymbolStatus(string symbol)
+{
+    int idx = GetSymbolIndex(symbol);
+    if(idx < 0) return "Not Found";
+    
+    if(!m_symbolData[idx].isActive) return "Inactive";
+    
+    string status = "";
+    status += "HTF: " + (m_symbolData[idx].HTFStructure.isBullish ? "Bull" : "Bear");
+    status += " | LTF: " + (m_symbolData[idx].LTFStructure.isBullish ? "Bull" : "Bear");
+    
+    if(HasOpenPosition(symbol))
+        status += " | POSITION OPEN";
+    else if(ShouldExecuteTrade(symbol))
+        status += " | SIGNAL READY";
+    
+    return status;
+}
+
+string CMultiSymbolSMC::GetActiveSymbol() const
+{
+    if(m_activeSymbolIndex >= 0 && m_activeSymbolIndex < m_totalSymbols)
+        return m_symbolList[m_activeSymbolIndex];
+    return "";
+}
+
+void CMultiSymbolSMC::SwitchActiveSymbol(int index)
+{
+    if(index >= 0 && index < m_totalSymbols)
+    {
+        m_activeSymbolIndex = index;
+        UpdateDashboard();
+    }
+}
+
+//+------------------------------------------------------------------+
+//|                    DASHBOARD FUNCTIONS                           |
+//+------------------------------------------------------------------+
+void CMultiSymbolSMC::CreateMultiSymbolDashboard()
+{
+    // Clear old objects
+    ObjectsDeleteAll(0, "MS_");
+    ObjectsDeleteAll(0, "SMC_");
+    
+    // Create main panel
+    string panelName = "MS_PANEL";
+    ObjectCreate(0, panelName, OBJ_RECTANGLE_LABEL, 0, 0, 0);
+    ObjectSetInteger(0, panelName, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+    ObjectSetInteger(0, panelName, OBJPROP_XDISTANCE, 10);
+    ObjectSetInteger(0, panelName, OBJPROP_YDISTANCE, 30);
+    ObjectSetInteger(0, panelName, OBJPROP_XSIZE, 350);
+    ObjectSetInteger(0, panelName, OBJPROP_YSIZE, 250 + (m_totalSymbols * 20));
+    ObjectSetInteger(0, panelName, OBJPROP_BGCOLOR, clrBlack);
+    ObjectSetInteger(0, panelName, OBJPROP_BORDER_TYPE, BORDER_RAISED);
+    ObjectSetInteger(0, panelName, OBJPROP_BORDER_COLOR, clrDarkGray);
+    ObjectSetInteger(0, panelName, OBJPROP_BACK, true);
+    
+    // Create title
+    string titleId = "MS_TITLE";
+    ObjectCreate(0, titleId, OBJ_LABEL, 0, 0, 0);
+    ObjectSetInteger(0, titleId, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+    ObjectSetInteger(0, titleId, OBJPROP_XDISTANCE, 20);
+    ObjectSetInteger(0, titleId, OBJPROP_YDISTANCE, 35);
+    ObjectSetInteger(0, titleId, OBJPROP_FONTSIZE, 12);
+    ObjectSetInteger(0, titleId, OBJPROP_COLOR, clrGold);
+    ObjectSetString(0, titleId, OBJPROP_TEXT, "SMC MULTI-SYMBOL DASHBOARD");
+    ObjectSetString(0, titleId, OBJPROP_FONT, "Arial Bold");
+    
+    // Create symbol buttons
+    int buttonY = 60;
+    for(int i = 0; i < m_totalSymbols; i++)
+    {
+        string buttonId = "MS_BTN_" + IntegerToString(i);
+        ObjectCreate(0, buttonId, OBJ_BUTTON, 0, 0, 0);
+        ObjectSetInteger(0, buttonId, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+        ObjectSetInteger(0, buttonId, OBJPROP_XDISTANCE, 20);
+        ObjectSetInteger(0, buttonId, OBJPROP_YDISTANCE, buttonY);
+        ObjectSetInteger(0, buttonId, OBJPROP_XSIZE, 80);
+        ObjectSetInteger(0, buttonId, OBJPROP_YSIZE, 20);
+        ObjectSetInteger(0, buttonId, OBJPROP_FONTSIZE, 9);
+        ObjectSetInteger(0, buttonId, OBJPROP_BGCOLOR, 
+                        i == m_activeSymbolIndex ? clrDarkGreen : clrDimGray);
+        ObjectSetString(0, buttonId, OBJPROP_TEXT, m_symbolList[i]);
+        ObjectSetString(0, buttonId, OBJPROP_FONT, "Arial");
+        
+        // Create status label for each symbol
+        string statusId = "MS_STATUS_" + IntegerToString(i);
+        ObjectCreate(0, statusId, OBJ_LABEL, 0, 0, 0);
+        ObjectSetInteger(0, statusId, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+        ObjectSetInteger(0, statusId, OBJPROP_XDISTANCE, 110);
+        ObjectSetInteger(0, statusId, OBJPROP_YDISTANCE, buttonY + 3);
+        ObjectSetInteger(0, statusId, OBJPROP_FONTSIZE, 8);
+        ObjectSetString(0, statusId, OBJPROP_FONT, "Arial");
+        
+        buttonY += 22;
+    }
+    
+    UpdateDashboard();
+}
+
+void CMultiSymbolSMC::UpdateDashboard()
+{
+    // Update symbol statuses
+    for(int i = 0; i < m_totalSymbols; i++)
+    {
+        string statusId = "MS_STATUS_" + IntegerToString(i);
+        string status = GetSymbolStatus(m_symbolList[i]);
+        
+        // Determine color based on status
+        color statusColor = clrSilver;
+        if(StringFind(status, "POSITION OPEN") >= 0)
+            statusColor = clrAqua;
+        else if(StringFind(status, "SIGNAL READY") >= 0)
+            statusColor = clrLime;
+        else if(StringFind(status, "Bull") >= 0 && StringFind(status, "Bear") < 0)
+            statusColor = clrGreen;
+        else if(StringFind(status, "Bear") >= 0 && StringFind(status, "Bull") < 0)
+            statusColor = clrRed;
+        
+        ObjectSetInteger(0, statusId, OBJPROP_COLOR, statusColor);
+        ObjectSetString(0, statusId, OBJPROP_TEXT, status);
+        
+        // Check button clicks
+        string buttonId = "MS_BTN_" + IntegerToString(i);
+        if(ObjectGetInteger(0, buttonId, OBJPROP_STATE))
+        {
+            SwitchActiveSymbol(i);
+            ObjectSetInteger(0, buttonId, OBJPROP_STATE, false);
+            
+            // Update button colors
+            for(int j = 0; j < m_totalSymbols; j++)
+            {
+                string btnId = "MS_BTN_" + IntegerToString(j);
+                ObjectSetInteger(0, btnId, OBJPROP_BGCOLOR, 
+                               j == i ? clrDarkGreen : clrDimGray);
+            }
+        }
+    }
+    
+    // Update detailed info for active symbol
+    if(m_activeSymbolIndex >= 0 && m_activeSymbolIndex < m_totalSymbols)
+    {
+        int yPos = 60 + (m_totalSymbols * 22) + 10;
+        string symbol = m_symbolList[m_activeSymbolIndex];
+        int idx = m_activeSymbolIndex;
+        
+        string labels[8];
+        color colors[8];
+        
+        labels[0] = "Active Symbol: " + symbol;
+        labels[1] = "HTF Trend: " + (m_symbolData[idx].HTFStructure.isBullish ? "BULLISH" : "BEARISH");
+        labels[2] = "LTF Trend: " + (m_symbolData[idx].LTFStructure.isBullish ? "BULLISH" : "BEARISH");
+        labels[3] = "Internal BoS: " + (m_symbolData[idx].InternalStructure.isBullish ? "YES" : "NO");
+        
+        // Count swept liquidity zones
+        int sweptCount = 0;
+        for(int i = 0; i < MAX_LIQUIDITY_ZONES; i++)
+        {
+            if(m_symbolData[idx].liquidityZones[i].isSwept)
+                sweptCount++;
+        }
+        labels[4] = "Liquidity Sweeps: " + IntegerToString(sweptCount);
+        
+        labels[5] = "Position: " + (HasOpenPosition(symbol) ? "OPEN" : "NONE");
+        labels[6] = "Signal: " + (ShouldExecuteTrade(symbol) ? "READY" : "WAITING");
+        labels[7] = "Total Positions: " + IntegerToString(GetActiveTradeCount());
+        
+        colors[0] = clrWhite;
+        colors[1] = m_symbolData[idx].HTFStructure.isBullish ? clrLime : clrTomato;
+        colors[2] = m_symbolData[idx].LTFStructure.isBullish ? clrLime : clrTomato;
+        colors[3] = m_symbolData[idx].InternalStructure.isBullish ? clrLime : clrRed;
+        colors[4] = sweptCount > 0 ? clrOrange : clrGray;
+        colors[5] = HasOpenPosition(symbol) ? clrAqua : clrSilver;
+        colors[6] = ShouldExecuteTrade(symbol) ? clrLime : clrDimGray;
+        colors[7] = clrGold;
+        
+        for(int i = 0; i < 8; i++)
+        {
+            string labelId = "MS_INFO_" + IntegerToString(i);
+            
+            if(ObjectFind(0, labelId) < 0)
+            {
+                ObjectCreate(0, labelId, OBJ_LABEL, 0, 0, 0);
+                ObjectSetInteger(0, labelId, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+                ObjectSetInteger(0, labelId, OBJPROP_XDISTANCE, 20);
+                ObjectSetInteger(0, labelId, OBJPROP_FONTSIZE, 10);
+                ObjectSetString(0, labelId, OBJPROP_FONT, "Arial");
+            }
+            
+            ObjectSetInteger(0, labelId, OBJPROP_YDISTANCE, yPos);
+            ObjectSetInteger(0, labelId, OBJPROP_COLOR, colors[i]);
+            ObjectSetString(0, labelId, OBJPROP_TEXT, labels[i]);
+            
+            yPos += 20;
+        }
+    }
+    
+    ChartRedraw(0);
+}
+
+//+------------------------------------------------------------------+
+//|                    GLOBAL INSTANCE                               |
+//+------------------------------------------------------------------+
+CMultiSymbolSMC* g_MultiSMC = NULL;
+
+//+------------------------------------------------------------------+
+//|                    HELPER FUNCTIONS                              |
+//+------------------------------------------------------------------+
+bool InitializeMultiSMC(const string &symbols[], int symbolCount)
+{
+    if(g_MultiSMC != NULL)
+        delete g_MultiSMC;
+    
+    g_MultiSMC = new CMultiSymbolSMC();
+    
+    if(!g_MultiSMC.Initialize(symbols, symbolCount))
+    {
+        delete g_MultiSMC;
+        g_MultiSMC = NULL;
+        return false;
+    }
+    
+    g_MultiSMC.CreateMultiSymbolDashboard();
+    return true;
+}
+
+void UpdateMultiSMC()
+{
+    if(g_MultiSMC == NULL) return;
+    
+    g_MultiSMC.UpdateAllSymbols();
+    g_MultiSMC.UpdateDashboard();
+    g_MultiSMC.ScanAllSymbolsForSignals();
+}
+
+void DestroyMultiSMC()
+{
+    if(g_MultiSMC != NULL)
+    {
+        delete g_MultiSMC;
+        g_MultiSMC = NULL;
+    }
+}
+
+//+------------------------------------------------------------------+SMC::Initialize(const string &symbols[], int symbolCount)
+{
+    if(symbolCount > m_settings.maxSymbols)
+    {
+        Print("Symbol count exceeds maximum allowed: ", m_settings.maxSymbols);
+        return false;
+    }
+    
+    m_totalSymbols = symbolCount;
+    ArrayResize(m_symbolData, m_totalSymbols);
+    ArrayResize(m_symbolList, m_totalSymbols);
+    
+    for(int i = 0; i < m_totalSymbols; i++)
+    {
+        m_symbolList[i] = symbols[i];
+        m_symbolData[i].symbol = symbols[i];
+        
+        // Initialize symbol info
+        if(!m_symbolData[i].symbolInfo.Name(symbols[i]))
+        {
+            Print("Failed to initialize symbol info for: ", symbols[i]);
+            continue;
+        }
+        
+        // Initialize structures
+        m_symbolData[i].HTFStructure.Reset();
+        m_symbolData[i].LTFStructure.Reset();
+        m_symbolData[i].InternalStructure.Reset();
+        
+        // Initialize arrays
+        ArrayResize(m_symbolData[i].orderBlocks, MAX_OBS_PER_SYMBOL);
+        ArrayResize(m_symbolData[i].fvgZones, MAX_FVGS_PER_SYMBOL);
+        ArrayResize(m_symbolData[i].liquidityZones, MAX_LIQUIDITY_ZONES);
+        
+        // Reset zones
+        for(int j = 0; j < MAX_OBS_PER_SYMBOL; j++)
+            m_symbolData[i].orderBlocks[j].Reset();
+        
+        for(int j = 0; j < MAX_FVGS_PER_SYMBOL; j++)
+            m_symbolData[i].fvgZones[j].Reset();
+        
+        for(int j = 0; j < MAX_LIQUIDITY_ZONES; j++)
+            m_symbolData[i].liquidityZones[j].Reset();
+        
+        m_symbolData[i].isActive = true;
+        m_symbolData[i].lastTradeTime = 0;
+        
+        // Initialize market structure
+        InitializeStructure(symbols[i], m_settings.HTF, 30, m_symbolData[i].HTFStructure);
+        InitializeStructure(symbols[i], m_settings.LTF, 30, m_symbolData[i].LTFStructure);
+        
+        Print("Initialized symbol: ", symbols[i]);
+    }
+    
+    trade.SetExpertMagicNumber(m_settings.magicNumber);
+    trade.SetDeviationInPoints(m_settings.slippage);
+    trade.SetTypeFilling(ORDER_FILLING_IOC);
+    
+    return true;
+}
+
+void CMultiSymbolSMC::SetParameters(const SMC_Settings &settings)
+{
+    m_settings = settings;
+    trade.SetExpertMagicNumber(m_settings.magicNumber);
+    trade.SetDeviationInPoints(m_settings.slippage);
+}
+
+int CMultiSymbolSMC::GetSymbolIndex(string symbol)
+{
+    for(int i = 0; i < m_totalSymbols; i++)
+    {
+        if(m_symbolList[i] == symbol)
+            return i;
+    }
+    return -1;
+}
+
+bool CMultiSymbolSMC::InitializeStructure(string symbol, ENUM_TIMEFRAMES tf, int bars, StructureState &state)
+{
+    double high[], low[];
+    ArraySetAsSeries(high, true);
+    ArraySetAsSeries(low, true);
+    
+    if(CopyHigh(symbol, tf, 0, bars, high) < bars || 
+       CopyLow(symbol, tf, 0, bars, low) < bars)
+    {
+        return false;
+    }
+    
+    int highestIndex = ArrayMaximum(high, 0, bars);
+    int lowestIndex = ArrayMinimum(low, 0, bars);
+    
+    state.lastHH = high[highestIndex];
+    state.lastLL = low[lowestIndex];
+    state.lastHL = state.lastLL;
+    state.lastLH = state.lastHH;
+    state.isBullish = true;
+    state.isInitialized = true;
+    state.lastUpdate = TimeCurrent();
+    
+    return true;
+}
+
+bool CMultiSymbolSMC::UpdateStructureLogic(string symbol, ENUM_TIMEFRAMES tf, StructureState &state)
+{
+    if(!state.isInitialized)
+        return InitializeStructure(symbol, tf, 30, state);
+    
+    double high[], low[], close[];
+    ArraySetAsSeries(high, true);
+    ArraySetAsSeries(low, true);
+    ArraySetAsSeries(close, true);
+    
+    if(CopyHigh(symbol, tf, 0, 5, high) < 5 || 
+       CopyLow(symbol, tf, 0, 5, low) < 5 || 
+       CopyClose(symbol, tf, 0, 5, close) < 5)
+    {
+        return false;
+    }
+    
+    double recentHigh = high[1];
+    double recentLow = low[1];
+    bool structureChanged = false;
+    
+    if(state.isBullish)
+    {
+        if(close[1] < state.lastHL)
+        {
+            state.isBullish = false;
+            state.lastLH = recentHigh;
+            state.lastLL = recentLow;
+            state.lastUpdate = TimeCurrent();
+            Print(symbol, " - Bearish BoS on ", EnumToString(tf));
+            structureChanged = true;
+        }
+        else if(recentHigh > state.lastHH)
+        {
+            state.lastHH = recentHigh;
+            state.lastHL = recentLow;
+            state.lastUpdate = TimeCurrent();
+        }
+    }
+    else
+    {
+        if(close[1] > state.lastLH)
+        {
+            state.isBullish = true;
+            state.lastHH = recentHigh;
+            state.lastHL = recentLow;
+            state.lastUpdate = TimeCurrent();
+            Print(symbol, " - Bullish BoS on ", EnumToString(tf));
+            structureChanged = true;
+        }
+        else if(recentLow < state.lastLL)
+        {
+            state.lastLL = recentLow;
+            state.lastLH = recentHigh;
+            state.lastUpdate = TimeCurrent();
+        }
+    }
+    
+    return structureChanged;
+}
+
+void CMultiSymbolSMC::UpdateMarketStructure(string symbol)
+{
+    int idx = GetSymbolIndex(symbol);
+    if(idx < 0) return;
+    
+    UpdateStructureLogic(symbol, m_settings.HTF, m_symbolData[idx].HTFStructure);
+    UpdateStructureLogic(symbol, m_settings.LTF, m_symbolData[idx].LTFStructure);
+}
+
+void CMultiSymbolSMC::DetectOrderBlocksForSymbol(int symbolIndex, ENUM_TIMEFRAMES tf, int lookback)
+{
+    if(symbolIndex < 0 || symbolIndex >= m_totalSymbols) return;
+    
+    string symbol = m_symbolData[symbolIndex].symbol;
+    double open[], close[], high[], low[];
+    ArraySetAsSeries(open, true);
+    ArraySetAsSeries(close, true);
+    ArraySetAsSeries(high, true);
+    ArraySetAsSeries(low, true);
+    
+    if(CopyOpen(symbol, tf, 0, lookback, open) < lookback ||
+       CopyClose(symbol, tf, 0, lookback, close) < lookback ||
+       CopyHigh(symbol, tf, 0, lookback, high) < lookback ||
+       CopyLow(symbol, tf, 0, lookback, low) < lookback)
+    {
+        return;
+    }
+    
+    // Clear existing OBs for this timeframe
+    for(int i = 0; i < MAX_OBS_PER_SYMBOL; i++)
+    {
+        if(m_symbolData[symbolIndex].orderBlocks[i].timeframe == tf)
+            m_symbolData[symbolIndex].orderBlocks[i].Reset();
+    }
+    
+    int obCount = 0;
+    for(int i = 2; i < lookback - 1 && obCount < MAX_OBS_PER_SYMBOL; i++)
+    {
+        double body = MathAbs(close[i] - open[i]);
+        double nextBody = MathAbs(close[i-1] - open[i-1]);
+        
+        // Bullish Order Block
+        if(close[i] < open[i] && close[i-1] > open[i-1] && nextBody > 1.5 * body)
+        {
+            for(int j = 0; j < MAX_OBS_PER_SYMBOL; j++)
+            {
+                if(!m_symbolData[symbolIndex].orderBlocks[j].isValid)
+                {
+                    m_symbolData[symbolIndex].orderBlocks[j].high = high[i];
+                    m_symbolData[symbolIndex].orderBlocks[j].low = low[i];
+                    m_symbolData[symbolIndex].orderBlocks[j].bodyHigh = MathMax(open[i], close[i]);
+                    m_symbolData[symbolIndex].orderBlocks[j].bodyLow = MathMin(open[i], close[i]);
+                    m_symbolData[symbolIndex].orderBlocks[j].time = iTime(symbol, tf, i);
+                    m_symbolData[symbolIndex].orderBlocks[j].isBullish = true;
+                    m_symbolData[symbolIndex].orderBlocks[j].isMitigated = false;
+                    m_symbolData[symbolIndex].orderBlocks[j].isValid = true;
+                    m_symbolData[symbolIndex].orderBlocks[j].filteredOut = false;
+                    m_symbolData[symbolIndex].orderBlocks[j].timeframe = tf;
+                    m_symbolData[symbolIndex].orderBlocks[j].symbol = symbol;
+                    obCount++;
+                    break;
+                }
+            }
+        }
+        
+        // Bearish Order Block
+        if(close[i] > open[i] && close[i-1] < open[i-1] && nextBody > 1.5 * body)
+        {
+            for(int j = 0; j < MAX_OBS_PER_SYMBOL; j++)
+            {
+                if(!m_symbolData[symbolIndex].orderBlocks[j].isValid)
+                {
+                    m_symbolData[symbolIndex].orderBlocks[j].high = high[i];
+                    m_symbolData[symbolIndex].orderBlocks[j].low = low[i];
+                    m_symbolData[symbolIndex].orderBlocks[j].bodyHigh = MathMax(open[i], close[i]);
+                    m_symbolData[symbolIndex].orderBlocks[j].bodyLow = MathMin(open[i], close[i]);
+                    m_symbolData[symbolIndex].orderBlocks[j].time = iTime(symbol, tf, i);
+                    m_symbolData[symbolIndex].orderBlocks[j].isBullish = false;
+                    m_symbolData[symbolIndex].orderBlocks[j].isMitigated = false;
+                    m_symbolData[symbolIndex].orderBlocks[j].isValid = true;
+                    m_symbolData[symbolIndex].orderBlocks[j].filteredOut = false;
+                    m_symbolData[symbolIndex].orderBlocks[j].timeframe = tf;
+                    m_symbolData[symbolIndex].orderBlocks[j].symbol = symbol;
+                    obCount++;
+                    break;
+                }
+            }
+        }
+    }
+}
+
+void CMultiSymbolSMC::DetectFVGZonesForSymbol(int symbolIndex, ENUM_TIMEFRAMES tf, int scanBars)
+{
+    if(symbolIndex < 0 || symbolIndex >= m_totalSymbols) return;
+    
+    string symbol = m_symbolData[symbolIndex].symbol;
+    double high[], low[];
+    ArraySetAsSeries(high, true);
+    ArraySetAsSeries(low, true);
+    
+    if(CopyHigh(symbol, tf, 0, scanBars, high) < scanBars ||
+       CopyLow(symbol, tf, 0, scanBars, low) < scanBars)
+    {
+        return;
+    }
+    
+    // Clear existing FVGs for this timeframe
+    for(int i = 0; i < MAX_FVGS_PER_SYMBOL; i++)
+    {
+        if(m_symbolData[symbolIndex].fvgZones[i].timeframe == tf)
+            m_symbolData[symbolIndex].fvgZones[i].Reset();
+    }
+    
+    int fvgCount = 0;
+    for(int i = 2; i < scanBars - 1 && fvgCount < MAX_FVGS_PER_SYMBOL; i++)
+    {
+        // Bullish FVG
+        if(low[i-2] > high[i])
+        {
+            for(int j = 0; j < MAX_FVGS_PER_SYMBOL; j++)
+            {
+                if(!m_symbolData[symbolIndex].fvgZones[j].isValid)
+                {
+                    m_symbolData[symbolIndex].fvgZones[j].lower = high[i];
+                    m_symbolData[symbolIndex].fvgZones[j].upper = low[i-2];
+                    m_symbolData[symbolIndex].fvgZones[j].created = iTime(symbol, tf, i);
+                    m_symbolData[symbolIndex].fvgZones[j].isBullish = true;
+                    m_symbolData[symbolIndex].fvgZones[j].isValid = true;
+                    m_symbolData[symbolIndex].fvgZones[j].filteredOut = false;
+                    m_symbolData[symbolIndex].fvgZones[j].timeframe = tf;
+                    m_symbolData[symbolIndex].fvgZones[j].symbol = symbol;
+                    fvgCount++;
+                    break;
+                }
+            }
+        }
+        
+        // Bearish FVG
+        if(high[i-2] < low[i])
+        {
+            for(int j = 0; j < MAX_FVGS_PER_SYMBOL; j++)
+            {
+                if(!m_symbolData[symbolIndex].fvgZones[j].isValid)
+                {
+                    m_symbolData[symbolIndex].fvgZones[j].upper = low[i];
+                    m_symbolData[symbolIndex].fvgZones[j].lower = high[i-2];
+                    m_symbolData[symbolIndex].fvgZones[j].created = iTime(symbol, tf, i);
+                    m_symbolData[symbolIndex].fvgZones[j].isBullish = false;
+                    m_symbolData[symbolIndex].fvgZones[j].isValid = true;
+                    m_symbolData[symbolIndex].fvgZones[j].filteredOut = false;
+                    m_symbolData[symbolIndex].fvgZones[j].timeframe = tf;
+                    m_symbolData[symbolIndex].fvgZones[j].symbol = symbol;
+                    fvgCount++;
+                    break;
+                }
+            }
+        }
+    }
+}
+
+void CMultiSymbolSMC::UpdateLiquidityZones(int symbolIndex)
+{
+    if(symbolIndex < 0 || symbolIndex >= m_totalSymbols) return;
+    
+    string symbol = m_symbolData[symbolIndex].symbol;
+    double high[], low[];
+    ArraySetAsSeries(high, true);
+    ArraySetAsSeries(low, true);
+    
+    int bars = 50;
+    if(CopyHigh(symbol, m_settings.HTF, 0, bars, high) < bars ||
+       CopyLow(symbol, m_settings.HTF, 0, bars, low) < bars)
+        return;
+    
+    // Find recent swing highs and lows
+    for(int i = 2; i < bars - 2; i++)
+    {
+        // Swing High
+        if(high[i] > high[i-1] && high[i] > high[i-2] && 
+           high[i] > high[i+1] && high[i] > high[i+2])
+        {
+            bool exists = false;
+            for(int j = 0; j < MAX_LIQUIDITY_ZONES; j++)
+            {
+                if(MathAbs(m_symbolData[symbolIndex].liquidityZones[j].price - high[i]) < 
+                   m_symbolData[symbolIndex].symbolInfo.Point() * 10)
+                {
+                    exists = true;
+                    break;
+                }
+            }
+            
+            if(!exists)
+            {
+                for(int j = 0; j < MAX_LIQUIDITY_ZONES; j++)
+                {
+                    if(m_symbolData[symbolIndex].liquidityZones[j].price == 0)
+                    {
+                        m_symbolData[symbolIndex].liquidityZones[j].price = high[i];
+                        m_symbolData[symbolIndex].liquidityZones[j].time = iTime(symbol, m_settings.HTF, i);
+                        m_symbolData[symbolIndex].liquidityZones[j].isHigh = true;
+                        m_symbolData[symbolIndex].liquidityZones[j].isSwept = false;
+                        m_symbolData[symbolIndex].liquidityZones[j].symbol = symbol;
+                        break;
+                    }
+                }
+            }
+        }
+        
+        // Swing Low
+        if(low[i] < low[i-1] && low[i] < low[i-2] && 
+           low[i] < low[i+1] && low[i] < low[i+2])
+        {
+            bool exists = false;
+            for(int j = 0; j < MAX_LIQUIDITY_ZONES; j++)
+            {
+                if(MathAbs(m_symbolData[symbolIndex].liquidityZones[j].price - low[i]) < 
+                   m_symbolData[symbolIndex].symbolInfo.Point() * 10)
+                {
+                    exists = true;
+                    break;
+                }
+            }
+            
+            if(!exists)
+            {
+                for(int j = 0; j < MAX_LIQUIDITY_ZONES; j++)
+                {
+                    if(m_symbolData[symbolIndex].liquidityZones[j].price == 0)
+                    {
+                        m_symbolData[symbolIndex].liquidityZones[j].price = low[i];
+                        m_symbolData[symbolIndex].liquidityZones[j].time = iTime(symbol, m_settings.HTF, i);
+                        m_symbolData[symbolIndex].liquidityZones[j].isHigh = false;
+                        m_symbolData[symbolIndex].liquidityZones[j].isSwept = false;
+                        m_symbolData[symbolIndex].liquidityZones[j].symbol = symbol;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+}
+
+void CMultiSymbolSMC::DetectLiquiditySweeps(int symbolIndex)
+{
+    if(symbolIndex < 0 || symbolIndex >= m_totalSymbols) return;
+    
+    string symbol = m_symbolData[symbolIndex].symbol;
+    m_symbolData[symbolIndex].symbolInfo.RefreshRates();
+    double currentBid = m_symbolData[symbolIndex].symbolInfo.Bid();
+    double currentAsk = m_symbolData[symbolIndex].symbolInfo.Ask();
+    
+    for(int i = 0; i < MAX_LIQUIDITY_ZONES; i++)
+    {
+        if(m_symbolData[symbolIndex].liquidityZones[i].price == 0) continue;
+        if(m_symbolData[symbolIndex].liquidityZones[i].isSwept) continue;
+        
+        if(m_symbolData[symbolIndex].liquidityZones[i].isHigh)
+        {
+            // Check if high has been swept
+            if(currentBid > m_symbolData[symbolIndex].liquidityZones[i].price)
+            {
+                m_symbolData[symbolIndex].liquidityZones[i].isSwept = true;
+                Print(symbol, " - Liquidity sweep detected at high: ", 
+                      m_symbolData[symbolIndex].liquidityZones[i].price);
+            }
+        }
+        else
+        {
+            // Check if low has been swept
+            if(currentAsk < m_symbolData[symbolIndex].liquidityZones[i].price)
+            {
+                m_symbolData[symbolIndex].liquidityZones[i].isSwept = true;
+                Print(symbol, " - Liquidity sweep detected at low: ", 
+                      m_symbolData[symbolIndex].liquidityZones[i].price);
+            }
+        }
+    }
+}
+
+void CMultiSymbolSMC::WatchForSweeps(string symbol)
+{
+    int idx = GetSymbolIndex(symbol);
+    if(idx < 0) return;
+    
+    UpdateLiquidityZones(idx);
+    DetectLiquiditySweeps(idx);
+}
+
+void CMultiSymbolSMC::UpdateZones(string symbol)
+{
+    int idx = GetSymbolIndex(symbol);
+    if(idx < 0) return;
+    
+    if(m_settings.enableOBs)
+    {
+        DetectOrderBlocksForSymbol(idx, m_settings.HTF, 50);
+        DetectOrderBlocksForSymbol(idx, m_settings.LTF, 50);
+    }
+    
+    if(m_settings.enableFVGs)
+    {
+        DetectFVGZonesForSymbol(idx, m_settings.HTF, 50);
+        DetectFVGZonesForSymbol(idx, m_settings.LTF, 50);
+    }
+}
+
+bool CMultiSymbolSMC::ZonesOverlap(double top1, double bottom1, double top2, double bottom2)
+{
+    return !(bottom1 > top2 || top1 < bottom2);
+}
+
+void CMultiSymbolSMC::FilterOverlappingZones(int symbolIndex)
+{
+    if(symbolIndex < 0 || symbolIndex >= m_totalSymbols) return;
+    
+    // Filter Order Blocks
+    for(int i = 0; i < MAX_OBS_PER_SYMBOL; i++)
+    {
+        if(!m_symbolData[symbolIndex].orderBlocks[i].isValid || 
+           m_symbolData[symbolIndex].orderBlocks[i].filteredOut)
+            continue;
+        
+        for(int j = i + 1; j < MAX_OBS_PER_SYMBOL; j++)
+        {
+            if(!m_symbolData[symbolIndex].orderBlocks[j].isValid || 
+               m_symbolData[symbolIndex].orderBlocks[j].filteredOut)
+                continue;
+            
+            if(m_symbolData[symbolIndex].orderBlocks[i].isBullish != 
+               m_symbolData[symbolIndex].orderBlocks[j].isBullish)
+                continue;
+            
+            if(ZonesOverlap(m_symbolData[symbolIndex].orderBlocks[i].high,
+                          m_symbolData[symbolIndex].orderBlocks[i].low,
+                          m_symbolData[symbolIndex].orderBlocks[j].high,
+                          m_symbolData[symbolIndex].orderBlocks[j].low))
+            {
+                if(m_symbolData[symbolIndex].orderBlocks[i].time > 
+                   m_symbolData[symbolIndex].orderBlocks[j].time)
+                    m_symbolData[symbolIndex].orderBlocks[j].filteredOut = true;
+                else
+                    m_symbolData[symbolIndex].orderBlocks[i].filteredOut = true;
+            }
+        }
+    }
+    
+    // Filter FVGs
+    for(int i = 0; i < MAX_FVGS_PER_SYMBOL; i++)
+    {
+        if(!m_symbolData[symbolIndex].fvgZones[i].isValid || 
+           m_symbolData[symbolIndex].fvgZones[i].filteredOut)
+            continue;
+        
+        for(int j = i + 1; j < MAX_FVGS_PER_SYMBOL; j++)
+        {
+            if(!m_symbolData[symbolIndex].fvgZones[j].isValid || 
+               m_symbolData[symbolIndex].fvgZones[j].filteredOut)
+                continue;
+            
+            if(m_symbolData[symbolIndex].fvgZones[i].isBullish != 
+               m_symbolData[symbolIndex].fvgZones[j].isBullish)
+                continue;
+            
+            if(ZonesOverlap(m_symbolData[symbolIndex].fvgZones[i].upper,
+                          m_symbolData[symbolIndex].fvgZones[i].lower,
+                          m_symbolData[symbolIndex].fvgZones[j].upper,
+                          m_symbolData[symbolIndex].fvgZones[j].lower))
+            {
+                if(m_symbolData[symbolIndex].fvgZones[i].created > 
+                   m_symbolData[symbolIndex].fvgZones[j].created)
+                    m_symbolData[symbolIndex].fvgZones[j].filteredOut = true;
+                else
+                    m_symbolData[symbolIndex].fvgZones[i].filteredOut = true;
+            }
+        }
+    }
+}
+
+void CMultiSymbolSMC::FilterZones(string symbol)
+{
+    int idx = GetSymbolIndex(symbol);
+    if(idx < 0) return;
+    
+    FilterOverlappingZones(idx);
+}
+
+int CMultiSymbolSMC::GetBestOrderBlockIndex(int symbolIndex, bool isBullish)
+{
+    if(symbolIndex < 0 || symbolIndex >= m_totalSymbols) return -1;
+    
+    int bestIndex = -1;
+    double bestScore = -999999.0;
+    m_symbolData[symbolIndex].symbolInfo.RefreshRates();
+    double currentPrice = m_symbolData[symbolIndex].symbolInfo.Bid();
+    
+    for(int i = 0; i < MAX_OBS_PER_SYMBOL; i++)
+    {
+        if(!m_symbolData[symbolIndex].orderBlocks[i].isValid || 
+           m_symbolData[symbolIndex].orderBlocks[i].filteredOut)
+            continue;
+        
+        if(m_symbolData[symbolIndex].orderBlocks[i].isBullish != isBullish)
+            continue;
+        
+        double distance = MathAbs(currentPrice - m_symbolData[symbolIndex].orderBlocks[i].bodyHigh);
+        double tfWeight = (m_symbolData[symbolIndex].orderBlocks[i].timeframe == m_settings.HTF) ? 1.3 : 1.0;
+        double agePenalty = (TimeCurrent() - m_symbolData[symbolIndex].orderBlocks[i].time) / 3600.0;
+        
+        double score = -distance * 10000 + 200 + tfWeight * (100 * m_settings.obWeight) - agePenalty;
+        
+        if(score > bestScore)
+        {
+            bestScore = score;
+            bestIndex = i;
+        }
+    }
+    
+    return bestIndex;
+}
+
+int CMultiSymbolSMC::GetBestFVGIndex(int symbolIndex, bool isBullish)
+{
+    if(symbolIndex < 0 || symbolIndex >= m_totalSymbols) return -1;
+    
+    int bestIndex = -1;
+    double bestScore = -999999.0;
+    m_symbolData[symbolIndex].symbolInfo.RefreshRates();
+    double currentPrice = m_symbolData[symbolIndex].symbolInfo.Bid();
+    
+    for(int i = 0; i < MAX_FVGS_PER_SYMBOL; i++)
+    {
+        if(!m_symbolData[symbolIndex].fvgZones[i].isValid || 
+           m_symbolData[symbolIndex].fvgZones[i].filteredOut)
+            continue;
+        
+        if(m_symbolData[symbolIndex].fvgZones[i].isBullish != isBullish)
+            continue;
+        
+        double distance = MathAbs(currentPrice - m_symbolData[symbolIndex].fvgZones[i].lower);
+        double tfWeight = (m_symbolData[symbolIndex].fvgZones[i].timeframe == m_settings.HTF) ? 1.2 : 1.0;
+        double agePenalty = (TimeCurrent() - m_symbolData[symbolIndex].fvgZones[i].created) / 3600.0;
+        
+        double score = -distance * 8000 + 100 + tfWeight * (80 * m_settings.fvgWeight) - agePenalty;
+        
+        if(score > bestScore)
+        {
+            bestScore = score;
+            bestIndex = i;
+        }
+    }
+    
+    return bestIndex;
+}
+
+bool CMultiSymbolSMC::IsPinBarPattern(string symbol, bool bullish, ENUM_TIMEFRAMES tf)
+{
+    double open = iOpen(symbol, tf, 1);
+    double close = iClose(symbol, tf, 1);
+    double high = iHigh(symbol, tf, 1);
+    double low = iLow(symbol, tf, 1);
+    
+    double body = MathAbs(close - open);
+    double wick = bullish ? (close - low) : (high - close);
+    double total = high - low;
+    
+    if(total == 0) return false;
+    
+    return (body / total < 0.3 && wick / total > 0.6);
+}
+
+bool CMultiSymbolSMC::IsEngulfingPattern(string symbol, bool bullish, ENUM_TIMEFRAMES tf)
+{
+    double open1 = iOpen(symbol, tf, 1);
+    double close1 = iClose(symbol, tf, 1);
+    double open2 = iOpen(symbol, tf, 2);
+    double close2 = iClose(symbol, tf, 2);
+    
+    if(bullish)
+        return (close1 > open1 && open1 < close2 && close1 > open2);
+    else
+        return (close1 < open1 && open1 > close2 && close1 < open2);
+}
+
+bool CMultiSymbolSMC::UpdateInternalBreakOfStructure(int symbolIndex, ENUM_TIMEFRAMES tf, bool bias)
+{
+    if(symbolIndex < 0 || symbolIndex >= m_totalSymbols) return false;
+    
+    string symbol = m_symbolData[symbolIndex].symbol;
+    double high[], low[], close[];
+    ArraySetAsSeries(high, true);
+    ArraySetAsSeries(low, true);
+    ArraySetAsSeries(close, true);
+    
+    if(CopyHigh(symbol, tf, 0, 5, high) < 5 || 
+       CopyLow(symbol, tf, 0, 5, low) < 5 || 
+       CopyClose(symbol, tf, 0, 5, close) < 5)
+        return false;
+    
+    if(!m_symbolData[symbolIndex].InternalStructure.isInitialized)
+    {
+        m_symbolData[symbolIndex].InternalStructure.lastHH = high[1];
+        m_symbolData[symbolIndex].InternalStructure.lastLL = low[1];
+        m_symbolData[symbolIndex].InternalStructure.lastHL = low[1];
+        m_symbolData[symbolIndex].InternalStructure.lastLH = high[1];
+        m_symbolData[symbolIndex].InternalStructure.isInitialized = true;
+        m_symbolData[symbolIndex].InternalStructure.isBullish = bias;
+        return false;
+    }
+    
+    if(bias)
+    {
+        if(close[1] > m_symbolData[symbolIndex].InternalStructure.lastLH)
+        {
+            m_symbolData[symbolIndex].InternalStructure.isBullish = true;
+            return true;
+        }
+    }
+    else
+    {
+        if(close[1] < m_symbolData[symbolIndex].InternalStructure.lastHL)
+        {
+            m_symbolData[symbolIndex].InternalStructure.isBullish = false;
+            return true;
+        }
+    }
+    
+    return false;
+}
+
+double CMultiSymbolSMC::CalculateATR(string symbol, ENUM_TIMEFRAMES tf, int period)
+{
+    double atrBuffer[];
+    ArraySetAsSeries(atrBuffer, true);
+    
+    int atrHandle = iATR(symbol, tf, period);
+    if(atrHandle == INVALID_HANDLE) return 0.0;
+    
+    if(CopyBuffer(atrHandle, 0, 0, 1, atrBuffer) <= 0)
+    {
+        IndicatorRelease(atrHandle);
+        return 0.0;
+    }
+    
+    double atrValue = atrBuffer[0];
+    IndicatorRelease(atrHandle);
+    
+    return atrValue;
+}
+
+bool CMultiSymbolSMC::ShouldExecuteTrade(string symbol)
+{
+    int idx = GetSymbolIndex(symbol);
+    if(idx < 0) return false;
+    
+    // Check if symbol is active
+    if(!m_symbolData[idx].isActive) return false;
+    
+    // Check if we already have a position
+    if(HasOpenPosition(symbol)) return false;
+    
+    // Check minimum time between trades
+    if(TimeCurrent() - m_symbolData[idx].lastTradeTime < 300) return false; // 5 minutes minimum
+    
+    // Check market bias alignment
+    bool marketBias = m_symbolData[idx].HTFStructure.isBullish && 
+                     m_symbolData[idx].LTFStructure.isBullish;
+    
+    // Check for zone taps
+    int obIndex = GetBestOrderBlockIndex(idx, marketBias);
+    int fvgIndex = GetBestFVGIndex(idx, marketBias);
+    
+    bool tappedOB = false;
+    bool tappedFVG = false;
+    
+    if(obIndex >= 0 && m_settings.enableOBs)
+    {
+        m_symbolData[idx].symbolInfo.RefreshRates();
+        double price = m_symbolData[idx].symbolInfo.Bid();
+        tappedOB = (price <= m_symbolData[idx].orderBlocks[obIndex].bodyHigh && 
+                    price >= m_symbolData[idx].orderBlocks[obIndex].bodyLow);
+    }
+    
+    if(fvgIndex >= 0 && m_settings.enableFVGs && !tappedOB)
+    {
+        m_symbolData[idx].symbolInfo.RefreshRates();
+        double price = m_symbolData[idx].symbolInfo.Bid();
+        tappedFVG = (price <= m_symbolData[idx].fvgZones[fvgIndex].upper && 
+                     price >= m_symbolData[idx].fvgZones[fvgIndex].lower);
+    }
+    
+    if(tappedOB || tappedFVG)
+    {
+        // Check liquidity sweep requirement
+        bool sweepOK = !m_settings.requireLiquiditySweep;
+        if(m_settings.requireLiquiditySweep)
+        {
+            for(int i = 0; i < MAX_LIQUIDITY_ZONES; i++)
+            {
+                if(m_symbolData[idx].liquidityZones[i].isSwept &&
+                   TimeCurrent() - m_symbolData[idx].liquidityZones[i].time < 3600) // Within last hour
+                {
+                    sweepOK = true;
+                    break;
+                }
+            }
+        }
+        
+        // Check internal BoS
+        bool microOK = !m_settings.requireInternalBoS || 
+                       UpdateInternalBreakOfStructure(idx, PERIOD_M1, marketBias);
+        
+        // Check candlestick patterns
+        bool candleOK = (!m_settings.usePinBar && !m_settings.useEngulfing) ||
+                        (m_settings.usePinBar && IsPinBarPattern(symbol, marketBias, PERIOD_M1)) ||
+                        (m_settings.useEngulfing && IsEngulfingPattern(symbol, marketBias, PERIOD_M1));
+        
+        if(sweepOK && microOK && candleOK)
+        {
+            return true;
+        }
+    }
+    
+    return false;
+}
+
+bool CMultiSymbolSMC::ExecuteTrade(string symbol)
+{
+    int idx = GetSymbolIndex(symbol);
+    if(idx < 0) return false;
+    
+    if(!m_symbolData[idx].symbolInfo.RefreshRates())
+        return false;
+    
+    bool marketBias = m_symbolData[idx].HTFStructure.isBullish && 
+                     m_symbolData[idx].LTFStructure.isBullish;
+    
+    double atr = CalculateATR(symbol, m_settings.LTF, 14);
+    if(atr == 0) return false;
+    
+    double stopDistance = atr * m_settings.atrMultiplier;
+    double price = marketBias ? m_symbolData[idx].symbolInfo.Ask() : 
+                                m_symbolData[idx].symbolInfo.Bid();
+    double sl = marketBias ? price - stopDistance : price + stopDistance;
+    double tp = marketBias ? price + (price - sl) * m_settings.rrTarget : 
+                            price - (sl - price) * m_settings.rrTarget;
+    
+    // Normalize prices
+    int digits = (int)m_symbolData[idx].symbolInfo.Digits();
+    sl = NormalizeDouble(sl, digits);
+    tp = NormalizeDouble(tp, digits);
+    
+    trade.SetExpertMagicNumber(m_settings.magicNumber);
+    trade.SetDeviationInPoints(m_settings.slippage);
+    
+    bool result = false;
+    if(marketBias)
+        result = trade.Buy(m_settings.lotSize, symbol, price, sl, tp, "SMC Multi-Symbol");
+    else
+        result = trade.Sell(m_settings.lotSize, symbol, price, sl, tp, "SMC Multi-Symbol");
+    
+    if(result)
+    {
+        m_symbolData[idx].lastTradeTime = TimeCurrent();
+        Print(symbol, " - Trade Placed: ", 
+              marketBias ? "BUY" : "SELL",
+              " | Price: ", price,
+              " | SL: ", sl,
+              " | TP: ", tp);
+        return true;
+    }
+    else
+    {
+        Print(symbol, " - Trade Failed: ", trade.ResultRetcode());
+        return false;
+    }
+}
+
+void CMultiSymbolSMC::UpdateAllSymbols()
+{
+    for(int i = 0; i < m_totalSymbols; i++)
+    {
+        if(!m_symbolData[i].isActive) continue;
+        
+        string symbol = m_symbolData[i].symbol;
+        UpdateMarketStructure(symbol);
+        UpdateZones(symbol);
+        FilterZones(symbol);
+        WatchForSweeps(symbol);
+    }
+}
+
+void CMultiSymbolSMC::UpdateSymbol(string symbol)
+{
+    UpdateMarketStructure(symbol);
+    UpdateZones(symbol);
+    FilterZones(symbol);
+    WatchForSweeps(symbol);
+}
+
+void CMultiSymbolSMC::ScanAllSymbolsForSignals()
+{
+    if(!m_settings.tradeAllSymbols) return;
+    
+    for(int i = 0; i < m_totalSymbols; i++)
+    {
+        if(!m_symbolData[i].isActive) continue;
+        
+        string symbol = m_symbolData[i].symbol;
+        
+        if(ShouldExecuteTrade(symbol))
+        {
+            ExecuteTrade(symbol);
+        }
+    }
+}
+
+bool CMultiSymbol
